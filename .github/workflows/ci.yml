@@ -16,7 +16,7 @@ jobs:
       - name: Sync（严格按 uv.lock，工具版本与本地一致）
         run: uv sync --all-extras --python 3.12
       - name: Ruff lint
-        run: uv run --no-sync ruff check src tests
+        run: uv run --no-sync ruff check src tests --output-format github
       - name: Ruff format
         run: uv run --no-sync ruff format --check src tests
       - name: Mypy
