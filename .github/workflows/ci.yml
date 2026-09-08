@@ -14,7 +14,7 @@ jobs:
         with:
           enable-cache: true
       - name: Sync（严格按 uv.lock，工具版本与本地一致）
-        run: uv sync --all-extras
+        run: uv sync --all-extras --python 3.12
       - name: Ruff lint
         run: uv run --no-sync ruff check src tests
       - name: Ruff format
