@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from tests.conftest import bars_frame, make_market_store
 
 from solidrock.backtest import BacktestConfig, BacktestEngine
 from solidrock.backtest.costs import FuturesCostModel
@@ -17,6 +16,7 @@ from solidrock.data.futures import (
 )
 from solidrock.data.store import DataStore
 from solidrock.strategy.base import Strategy
+from tests.conftest import bars_frame, make_market_store
 
 SYM = "RB2505.SHFE"
 

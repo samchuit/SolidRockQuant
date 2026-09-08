@@ -15,10 +15,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-from tests.conftest import install_fake_module
 
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.data.sources.akshare_source import AkshareSource
+from tests.conftest import install_fake_module
 
 
 def em_frame(code: str = "000001", *, scale: float = 1.0) -> pd.DataFrame:

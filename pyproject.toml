@@ -74,6 +74,10 @@ select = [
 # 中文文档项目：全角标点在 docstring/注释/字符串中大量使用，属误报
 # RUF012 与公共 API 冲突：Strategy.params 类属性即参数声明接口（可变类属性是有意设计）
 ignore = ["RUF001", "RUF002", "RUF003", "RUF012"]
+
+[tool.ruff.lint.isort]
+# 显式声明第一方模块，避免依赖 src 目录探测在环境间的歧义
+known-first-party = ["solidrock", "tests"]
 # RUF012 与公共 API 冲突：Strategy.params 类属性即参数声明接口（可变类属性是有意设计）
 
 [tool.ruff.lint.flake8-bugbear]

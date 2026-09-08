@@ -5,10 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from tests.conftest import make_bars
 
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.data.schema import DAILY_BAR_COLUMN_NAMES, empty_bars_frame, validate_bars
+from tests.conftest import make_bars
 
 
 class TestValidate:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from tests.conftest import make_bars
 
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.data.sources import create_source, list_sources
 from solidrock.data.sources.base import Capability, DataSource, normalize_range
 from solidrock.data.sources.registry import register_source
 from solidrock.data.symbols import AssetType
+from tests.conftest import make_bars
 
 
 class StubSource(DataSource):

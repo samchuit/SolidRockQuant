@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.conftest import make_market_store
 
 from solidrock.backtest import BacktestConfig, BacktestEngine
 from solidrock.backtest.costs import AShareCostModel
 from solidrock.strategy.loader import load_strategy_class
+from tests.conftest import make_market_store
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 

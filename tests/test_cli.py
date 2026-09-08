@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.conftest import make_bars
 from typer.testing import CliRunner
 
 from solidrock.cli.main import app
 from solidrock.config import get_settings
 from solidrock.data.store import DataStore
+from tests.conftest import make_bars
 
 runner = CliRunner()
 

@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from tests.conftest import bars_frame
 
 from solidrock.agent.tools import ALL_TOOLS
 from solidrock.data.store import DataStore
@@ -23,6 +22,7 @@ from solidrock.factors import (
     zscore,
 )
 from solidrock.factors.analysis import _cross_spearman
+from tests.conftest import bars_frame
 
 N_SYMBOLS = 8
 

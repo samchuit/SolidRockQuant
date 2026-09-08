@@ -7,10 +7,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from tests.conftest import bars_frame, make_market_store
 
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.data.quality import check_store, render_health_markdown
+from tests.conftest import bars_frame, make_market_store
 
 
 def _healthy_store(tmp_path: Path) -> object:

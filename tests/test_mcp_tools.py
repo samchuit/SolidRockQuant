@@ -8,13 +8,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from tests.conftest import make_market_store
 
 from solidrock.agent.tools import ALL_TOOLS, json_safe, tool_get_data_overview, tool_validate_strategy
 from solidrock.backtest.costs import AShareCostModel
 from solidrock.data.sources.base import Capability, DataSource
 from solidrock.data.sources.registry import register_source
 from solidrock.experiments.tracker import ExperimentTracker
+from tests.conftest import make_market_store
 
 
 class StubSource(DataSource):

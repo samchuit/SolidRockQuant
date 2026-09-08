@@ -200,9 +200,8 @@ class TestAuth:
         assert "SOLIDROCK_TUSHARE_TOKEN" in exc_info.value.hint
 
     def test_permission_error_translated(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from tests.conftest import install_fake_module
-
         from solidrock.agent.errors import ErrorCode, SolidRockError
+        from tests.conftest import install_fake_module
 
         class FakeTsModule:
             def set_token(self, token: str) -> None:
