@@ -63,6 +63,20 @@ _SINA_FUT_RENAME: dict[str, str] = {
 # 新浪个股回退时向前多取的日历天数（用于计算复权因子比值与除权昨收）
 _SINA_PAD_DAYS = 45
 
+# 东财分钟线列名映射
+_EM_MIN_RENAME: dict[str, str] = {
+    "时间": "date",
+    "开盘": "open",
+    "最高": "high",
+    "最低": "low",
+    "收盘": "close",
+    "成交量": "volume",
+    "成交额": "amount",
+    "换手率": "turnover_rate",
+}
+# 新浪个股分钟列名
+_SINA_STOCK_MIN_RENAME: dict[str, str] = {"day": "date"}
+
 
 def _ensure_ak() -> Any:
     """惰性导入 akshare；缺库时给安装 hint。"""
@@ -87,6 +101,8 @@ class AkshareSource(DataSource):
             Capability.BARS_DAILY_ETF,
             Capability.BARS_DAILY_FUTURES,
             Capability.BARS_DAILY_FUTURES_CONTINUOUS,
+            Capability.BARS_MINUTE_1,
+            Capability.BARS_MINUTE_5,
             Capability.CALENDAR,
             Capability.INSTRUMENTS_STOCK,
             Capability.INDEX_CONSTITUENTS,
@@ -123,6 +139,88 @@ class AkshareSource(DataSource):
             f"无法识别 {symbol.value} 的资产类型",
             hint="用 parse_symbol 检查符号；股票/指数/ETF/期货均支持",
         )
+
+    # -------------------------------------------------------------- 分钟线
+    def _fetch_minutes_one(
+        self,
+        symbol: Symbol,
+        freq: str,
+        start: pd.Timestamp | None,
+        end: pd.Timestamp | None,
+    ) -> pd.DataFrame:
+        """分钟线：股票/ETF/指数走东财（个股有新浪回退），期货走新浪.
+
+        新浪个股分钟 ``volume`` 单位按股处理（÷100 转手，与新浪日线一致）；
+        期货分钟成交量单位为手，原样保留。分钟数据无复权（adj_factor=NaN）。
+        """
+        ak = _ensure_ak()
+        period = "1" if freq == "1m" else "5"
+        t = symbol.asset_type
+        fmt = "%Y-%m-%d %H:%M:%S"
+        params = {
+            "start_date": start.strftime(fmt) if start is not None else "1990-01-01 09:30:00",
+            "end_date": end.strftime(fmt) if end is not None else "2999-01-01 09:30:00",
+        }
+
+        if t in (AssetType.FUTURES, AssetType.FUTURES_CONTINUOUS):
+            raw = self._request(
+                f"期货分钟 {symbol.value}",
+                ak.futures_zh_minute_sina,
+                symbol=symbol.code,
+                period=period,
+            )
+            df = _standardize_sina_fut_minute(raw, symbol)
+        elif t is AssetType.STOCK:
+            try:
+                raw = self._request(
+                    f"分钟线 {symbol.value}",
+                    ak.stock_zh_a_hist_min_em,
+                    symbol=to_source_code(symbol, "akshare_em"),
+                    period=period,
+                    adjust="",
+                    **params,
+                )
+                df = _standardize_em_minute(raw, symbol)
+            except SolidRockError as em_exc:
+                df = _fallback_to_sina(
+                    symbol,
+                    em_exc,
+                    lambda: _standardize_sina_stock_minute(
+                        self._request(
+                            f"新浪分钟线 {symbol.value}",
+                            ak.stock_zh_a_minute,
+                            symbol=_sina_a_code(symbol),
+                            period=period,
+                            adjust="",
+                        ),
+                        symbol,
+                    ),
+                )
+        elif t is AssetType.ETF:
+            raw = self._request(
+                f"ETF分钟 {symbol.value}",
+                ak.fund_etf_hist_min_em,
+                symbol=to_source_code(symbol, "akshare_em"),
+                period=period,
+                adjust="",
+                **params,
+            )
+            df = _standardize_em_minute(raw, symbol)
+        elif t is AssetType.INDEX:
+            raw = self._request(
+                f"指数分钟 {symbol.value}",
+                ak.index_zh_a_hist_min_em,
+                symbol=to_source_code(symbol, "akshare_em"),
+                period=period,
+                **params,
+            )
+            df = _standardize_em_minute(raw, symbol)
+        else:
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                f"分钟线不支持 {symbol.value}（北交所等）",
+            )
+        return _slice_range(df, start, end)
 
     # ------------------------------------------------------------- 股票（EM→新浪）
     def _fetch_stock(
@@ -453,6 +551,50 @@ def _standardize_sina_fund(raw: pd.DataFrame, symbol: Symbol) -> pd.DataFrame:
     df["volume"] = df["volume"] / 100.0  # 股 → 手
     df["pre_close"] = df["close"].shift(1)
     df["adj_factor"] = np.nan
+    return _finalize(df, symbol)
+
+
+def _standardize_em_minute(raw: pd.DataFrame, symbol: Symbol) -> pd.DataFrame:
+    """东财分钟线 → 标准列；分钟无复权与昨收（pre_close 用 shift(1) 近似）。"""
+    if raw is None or len(raw) == 0:
+        return pd.DataFrame(columns=list(DAILY_BAR_COLUMN_NAMES))
+    df = raw.rename(columns=_EM_MIN_RENAME)
+    for col in ("open", "high", "low", "close", "volume", "amount", "turnover_rate"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"])
+    df["pre_close"] = df["close"].shift(1)
+    df["adj_factor"] = np.nan
+    return _finalize(df, symbol)
+
+
+def _standardize_sina_stock_minute(raw: pd.DataFrame, symbol: Symbol) -> pd.DataFrame:
+    """新浪个股分钟 → 标准列；volume 按股处理（÷100 转手）。"""
+    if raw is None or len(raw) == 0:
+        return pd.DataFrame(columns=list(DAILY_BAR_COLUMN_NAMES))
+    df = raw.rename(columns=_SINA_STOCK_MIN_RENAME)
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"])
+    if "volume" in df.columns:
+        df["volume"] = df["volume"] / 100.0  # 股 → 手
+    df["pre_close"] = df["close"].shift(1)
+    df["adj_factor"] = np.nan
+    return _finalize(df, symbol)
+
+
+def _standardize_sina_fut_minute(raw: pd.DataFrame, symbol: Symbol) -> pd.DataFrame:
+    """新浪期货分钟 → 标准列；hold → open_interest，成交量原样（手）。"""
+    if raw is None or len(raw) == 0:
+        return pd.DataFrame(columns=list(DAILY_BAR_COLUMN_NAMES))
+    df = raw.rename(columns={"hold": "open_interest", "settle": "settle"})
+    for col in ("open", "high", "low", "close", "volume", "open_interest", "settle"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["date"] = pd.to_datetime(df["datetime"] if "datetime" in df.columns else df["date"])
+    df["pre_close"] = df["close"].shift(1)
+    df["adj_factor"] = 1.0
     return _finalize(df, symbol)
 
 

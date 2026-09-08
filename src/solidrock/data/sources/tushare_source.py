@@ -52,6 +52,8 @@ class TushareSource(DataSource):
             Capability.BARS_DAILY_INDEX,
             Capability.BARS_DAILY_ETF,
             Capability.BARS_DAILY_FUTURES,
+            Capability.BARS_MINUTE_1,
+            Capability.BARS_MINUTE_5,
             Capability.CALENDAR,
         }
     )
@@ -162,6 +164,54 @@ class TushareSource(DataSource):
             f"tushare 适配器不支持 {symbol.value}（主连请换用 akshare 数据源）",
             hint="主连形如 RB.SHFE；tushare 主连需合约映射，计划在 v0.2 支持",
         )
+
+    # -------------------------------------------------------------- 分钟线
+    def _fetch_minutes_one(
+        self,
+        symbol: Symbol,
+        freq: str,
+        start: pd.Timestamp | None,
+        end: pd.Timestamp | None,
+    ) -> pd.DataFrame:
+        """Tushare 分钟线（stk_mins，股票专用，接口需较高积分）.
+
+        列：trade_time/open/high/low/close/vol(手)/amount(元)。
+        """
+        if symbol.asset_type is not AssetType.STOCK:
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                f"tushare 分钟线仅支持股票，收到 {symbol.value}",
+                hint="期货分钟用 akshare（futures_zh_minute_sina）",
+            )
+        pro = self._api()
+        params = {
+            "ts_code": symbol.value,
+            "freq": "1min" if freq == "1m" else "5min",
+            "start_date": _fmt(start, default="1990-01-01 09:00:00"),
+            "end_date": _fmt(end, default="2099-01-01 15:00:00"),
+        }
+        raw = self._call(f"stk_mins {symbol.value}", pro.stk_mins, **params)
+        if raw is None or len(raw) == 0:
+            return pd.DataFrame(columns=list(DAILY_BAR_COLUMN_NAMES))
+        df = raw.rename(columns={"vol": "volume"})
+        df["date"] = pd.to_datetime(df["trade_time"])
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.sort_values("date", kind="stable").reset_index(drop=True)
+        df["pre_close"] = df["close"].shift(1)
+        df["adj_factor"] = np.nan
+        df["symbol"] = symbol.value
+        df["suspended"] = False
+        for col in DAILY_BAR_COLUMN_NAMES:
+            if col not in df.columns:
+                df[col] = pd.NA
+        mask = pd.Series(True, index=df.index)
+        if start is not None:
+            mask &= df["date"] >= start
+        if end is not None:
+            mask &= df["date"] <= end
+        return df.loc[mask].reset_index(drop=True)
 
     # -------------------------------------------------------------- 其他数据
     def _fetch_calendar(self, start: pd.Timestamp | None, end: pd.Timestamp | None) -> pd.DataFrame:

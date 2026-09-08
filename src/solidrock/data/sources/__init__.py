@@ -5,7 +5,7 @@
 ``SOURCE_UNAVAILABLE``（带安装 hint）。
 """
 
-from solidrock.data.sources import akshare_source, tushare_source  # 导入即注册
+from solidrock.data.sources import akshare_source, baostock_source, tushare_source  # 导入即注册
 from solidrock.data.sources.base import Capability, DataSource
 from solidrock.data.sources.registry import (
     create_source,
@@ -18,6 +18,7 @@ __all__ = [
     "Capability",
     "DataSource",
     "akshare_source",
+    "baostock_source",
     "create_source",
     "list_sources",
     "register_source",

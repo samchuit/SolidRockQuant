@@ -87,7 +87,7 @@ class DataStore:
     def save_bars(self, df: pd.DataFrame, *, freq: str = "1d", source: str | None = None) -> dict[str, int]:
         """整表落库（按符号整文件覆盖）。返回 {symbol: 行数}。"""
         self._ensure_writable()
-        df = validate_bars(df)
+        df = validate_bars(df, freq=freq)
         counts: dict[str, int] = {}
         for symbol, part in df.groupby("symbol", sort=False):
             path = self._bar_file(str(symbol), freq)
@@ -102,7 +102,7 @@ class DataStore:
         幂等：同一批数据重复更新结果不变。返回 {symbol: 合并后总行数}。
         """
         self._ensure_writable()
-        df = validate_bars(df)
+        df = validate_bars(df, freq=freq)
         totals: dict[str, int] = {}
         for symbol, new_part in df.groupby("symbol", sort=False):
             symbol = str(symbol)
@@ -193,7 +193,7 @@ class DataStore:
         finally:
             con.close()
 
-        df = validate_bars(df)
+        df = validate_bars(df, freq=freq)
         if start is not None:
             df = df[df["date"] >= pd.Timestamp(start)]
         if end is not None:

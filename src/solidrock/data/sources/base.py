@@ -36,6 +36,8 @@ class Capability(str, Enum):
     BARS_DAILY_ETF = "bars_daily_etf"
     BARS_DAILY_FUTURES = "bars_daily_futures"
     BARS_DAILY_FUTURES_CONTINUOUS = "bars_daily_futures_continuous"
+    BARS_MINUTE_1 = "bars_minute_1"
+    BARS_MINUTE_5 = "bars_minute_5"
     CALENDAR = "calendar"
     INSTRUMENTS_STOCK = "instruments_stock"
     INDEX_CONSTITUENTS = "index_constituents"
@@ -71,26 +73,33 @@ class DataSource(ABC):
         *,
         with_adj_factor: bool = True,
     ) -> pd.DataFrame:
-        """拉取日线并返回标准 schema（多符号逐个请求后合并）.
+        """拉取日线/分钟线并返回标准 schema（多符号逐个请求后合并）.
 
-        返回空 DataFrame 表示区间内无数据；符号在源中不存在时同样返回空
-        （无法与"区间无数据"区分时，以空为准，由调用方决定是否报错）。
+        ``freq``：``1d``（默认）/ ``1m`` / ``5m``。分钟线需要数据源声明
+        对应能力。返回空 DataFrame 表示区间内无数据；符号在源中不存在时
+        同样返回空（无法与"区间无数据"区分时，以空为准，由调用方决定是否报错）。
         """
-        if freq != "1d":
+        if freq not in ("1d", "1m", "5m"):
             raise err(
                 ErrorCode.PARAM_INVALID,
-                f"v0.1 仅支持日线 freq='1d'，收到 {freq!r}",
-                hint="分钟线计划在 v0.2 支持",
+                f"freq 仅支持 1d/1m/5m，收到 {freq!r}",
             )
         start_ts, end_ts = normalize_range(start, end)
         symbol_list: list[Symbol] = (
             validate_symbols([symbols]) if isinstance(symbols, str) else validate_symbols(list(symbols))
         )
-        frames = [self._fetch_bars_one(sym, start_ts, end_ts, with_adj_factor=with_adj_factor) for sym in symbol_list]
+        if freq == "1d":
+            frames = [
+                self._fetch_bars_one(sym, start_ts, end_ts, with_adj_factor=with_adj_factor) for sym in symbol_list
+            ]
+        else:
+            capability = Capability.BARS_MINUTE_1 if freq == "1m" else Capability.BARS_MINUTE_5
+            self.require(capability)
+            frames = [self._fetch_minutes_one(sym, freq, start_ts, end_ts) for sym in symbol_list]
         frames = [f for f in frames if f is not None and not f.empty]
         if not frames:
             return empty_bars_frame()
-        return validate_bars(pd.concat(frames, ignore_index=True))
+        return validate_bars(pd.concat(frames, ignore_index=True), freq=freq)
 
     @abstractmethod
     def _fetch_bars_one(
@@ -102,6 +111,20 @@ class DataSource(ABC):
         with_adj_factor: bool,
     ) -> pd.DataFrame:
         """拉取单符号日线，返回已映射为标准列名的 DataFrame（可为空）。"""
+
+    def _fetch_minutes_one(
+        self,
+        symbol: Symbol,
+        freq: str,
+        start: pd.Timestamp | None,
+        end: pd.Timestamp | None,
+    ) -> pd.DataFrame:
+        """拉取单符号分钟线（``freq`` = 1m/5m），标准列名，date 保留日内时间戳."""
+        raise err(
+            ErrorCode.CAPABILITY_NOT_SUPPORTED,
+            f"数据源 {self.name!r} 未实现分钟线",
+            hint="当前支持分钟线的数据源见 list_sources()；分钟回测尚未支持，数据仅供研究",
+        )
 
     # -------------------------------------------------------------- 其他数据
     def fetch_calendar(

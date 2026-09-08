@@ -90,9 +90,10 @@ def data_update(
     start: str | None = typer.Option(None, "--start", help="起始日期 YYYY-MM-DD（缺省增量续拉）"),
     end: str | None = typer.Option(None, "--end", help="结束日期 YYYY-MM-DD（缺省到今天）"),
     full: bool = typer.Option(False, "--full", help="忽略增量，从 --start 全量重拉"),
+    freq: str = typer.Option("1d", "--freq", help="频率：1d / 1m / 5m"),
     no_adj: bool = typer.Option(False, "--no-adj", help="跳过复权因子（更快，但前复权不可用）"),
 ) -> None:
-    """拉取/更新日线行情到本地仓库（增量幂等）。"""
+    """拉取/更新行情到本地仓库（增量幂等）。"""
     settings = get_settings()
     symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     try:
@@ -101,9 +102,9 @@ def data_update(
         store = _store()
         fetch_start = start
         if fetch_start is None and not full:
-            fetch_start = _incremental_start(store, symbol_list)
-        with console.status(f"[cyan]{src.name} 拉取 {len(symbol_list)} 个标的 …"):
-            df = src.fetch_bars(symbol_list, start=fetch_start, end=end, with_adj_factor=not no_adj)
+            fetch_start = _incremental_start(store, symbol_list, freq=freq)
+        with console.status(f"[cyan]{src.name} 拉取 {len(symbol_list)} 个标的（{freq}）…"):
+            df = src.fetch_bars(symbol_list, start=fetch_start, end=end, freq=freq, with_adj_factor=not no_adj)
             if df.empty:
                 raise SolidRockError(
                     ErrorCode.NO_DATA,
@@ -111,7 +112,7 @@ def data_update(
                     + (f"（区间 {fetch_start} ~ {end}）" if fetch_start or end else ""),
                     hint="检查符号与日期区间；首次拉取建议显式给 --start",
                 )
-            totals = store.update_bars(df, source=src.name)
+            totals = store.update_bars(df, freq=freq, source=src.name)
     except SolidRockError as e:
         _print_error(e)
         raise typer.Exit(1) from e
@@ -128,9 +129,9 @@ def data_update(
     )
 
 
-def _incremental_start(store: DataStore, symbol_list: list[str]) -> str:
+def _incremental_start(store: DataStore, symbol_list: list[str], *, freq: str = "1d") -> str:
     """增量起点：全部符号都有本地数据时，从最早的最后日期次日续拉；否则全量。"""
-    last_dates = [store.last_date(s) for s in symbol_list]
+    last_dates = [store.last_date(s, freq=freq) for s in symbol_list]
     if all(d is not None for d in last_dates):
         earliest = min(d for d in last_dates if d is not None)
         return (earliest + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -407,6 +408,62 @@ def factor_analyze(
         table.add_row(f"{label} 年化", f"{row['annual_return'] * 100:.2f}%")
     console.print(table)
     console.print(f"产物目录：{result.artifacts_dir}", style="dim")
+
+
+@factor_app.command("screen")
+def factor_screen(
+    factor_file: Path = typer.Argument(..., help="因子文件路径（内含一个 Factor 子类）"),
+    universe: str = typer.Option(..., "--universe", "-u", help="逗号分隔的股票池符号"),
+    start: str = typer.Option(..., "--start"),
+    end: str = typer.Option(..., "--end"),
+    top: float = typer.Option(0.2, "--top", help="做多头部比例"),
+    bottom: float = typer.Option(0.2, "--bottom", help="做空尾部比例"),
+    fee_rate: float = typer.Option(1.5e-4, "--fee-rate", help="单边费率"),
+    param: list[str] = typer.Option([], "--param", "-p", help="因子参数 k=v，可多次"),
+    name: str | None = typer.Option(None, "--name"),
+) -> None:
+    """向量化因子筛选：多空组合快速净值（秒级，用于扫参数）。"""
+    import json as _json
+
+    from solidrock.agent.tools import tool_run_vectorized_backtest
+    from solidrock.strategy.loader import parse_param_pairs
+
+    universe_list = [s.strip().upper() for s in universe.split(",") if s.strip()]
+    try:
+        validate_symbols(universe_list)
+        raw = tool_run_vectorized_backtest(
+            factor_file=str(factor_file),
+            universe=universe_list,
+            start=start,
+            end=end,
+            params=parse_param_pairs(list(param)),
+            top=top,
+            bottom=bottom,
+            fee_rate=fee_rate,
+            name=name,
+        )
+        envelope = _json.loads(raw)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    if envelope["status"] != "ok":
+        from solidrock.agent.errors import ErrorCode as _ec
+        from solidrock.agent.errors import err as _err
+
+        _print_error(_err(_ec.INTERNAL_ERROR, "向量化回测失败", details=envelope.get("error")))
+        raise typer.Exit(1)
+    data = envelope["data"]
+    m = data["metrics"]
+    table = Table(title=f"向量化筛选完成 · {data['run_id']}")
+    table.add_column("指标", style="cyan")
+    table.add_column("数值", justify="right")
+    table.add_row("累计收益", f"{m.get('total_return', 0) * 100:.2f}%")
+    table.add_row("年化收益", f"{m.get('annual_return', 0) * 100:.2f}%")
+    table.add_row("夏普", f"{m.get('sharpe', 0):.2f}")
+    table.add_row("最大回撤", f"{m.get('max_drawdown', 0) * 100:.2f}%")
+    table.add_row("年化换手", f"{m.get('annual_turnover', 0) * 100:.0f}%")
+    console.print(table)
+    console.print(f"产物目录：{data['artifacts'][0]}", style="dim")
 
 
 # ----------------------------------------------------------------- experiment

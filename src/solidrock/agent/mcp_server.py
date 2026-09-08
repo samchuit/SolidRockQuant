@@ -79,14 +79,15 @@ def build_server() -> Any:
         start: str | None = None,
         end: str | None = None,
         source: str | None = None,
+        freq: str = "1d",
     ) -> str:
-        """拉取/更新日线行情到本地（增量幂等，含复权因子）。
+        """拉取/更新行情到本地（增量幂等）。
 
         symbols 为统一符号或其列表，如 ["000001.SZ", "510300.SH"]；
-        start/end 格式 YYYY-MM-DD（建议显式给 start）。回测前确保数据已覆盖
-        回测区间往前至少 250 个交易日（供指标 warmup）。
+        start/end 格式 YYYY-MM-DD（建议显式给 start）；freq：1d（默认）/
+        1m / 5m（分钟线无复权因子，仅供研究，事件回测用日线）。
         """
-        return t.tool_fetch_bars(symbols=symbols, start=start, end=end, source=source)
+        return t.tool_fetch_bars(symbols=symbols, start=start, end=end, source=source, freq=freq)
 
     @mcp.tool()
     def get_trading_calendar(
@@ -178,6 +179,35 @@ def build_server() -> Any:
             params=params,
             quantiles=quantiles,
             fwd_period=fwd_period,
+            name=name,
+        )
+
+    @mcp.tool()
+    def run_vectorized_backtest(
+        factor_file: str,
+        universe: list[str],
+        start: str,
+        end: str,
+        params: dict[str, Any] | None = None,
+        top: float = 0.2,
+        bottom: float = 0.2,
+        fee_rate: float = 1.5e-4,
+        name: str | None = None,
+    ) -> str:
+        """向量化因子筛选：做多头部分位、做空尾部分位的组合净值（秒级）。
+
+        适合批量扫参数的快速迭代；逐日再平衡、收盘成交、单一费率，
+        结论仅用于相对比较，最终结论用 run_backtest 事件引擎复核。
+        """
+        return t.tool_run_vectorized_backtest(
+            factor_file=factor_file,
+            universe=universe,
+            start=start,
+            end=end,
+            params=params,
+            top=top,
+            bottom=bottom,
+            fee_rate=fee_rate,
             name=name,
         )
 

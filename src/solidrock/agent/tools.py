@@ -173,20 +173,21 @@ def _fetch_bars(
     end: str | None = None,
     source: str | None = None,
     with_adj_factor: bool = True,
+    freq: str = "1d",
 ) -> dict:
     symbol_list = [symbols] if isinstance(symbols, str) else list(symbols)
     validate_symbols(symbol_list)
     src = create_source(source or get_settings().default_source)
     store = _store()
     t0 = time.perf_counter()
-    df = src.fetch_bars(symbol_list, start=start, end=end, with_adj_factor=with_adj_factor)
+    df = src.fetch_bars(symbol_list, start=start, end=end, freq=freq, with_adj_factor=with_adj_factor)
     if df.empty:
         raise err(
             ErrorCode.NO_DATA,
             f"数据源 {src.name} 未返回任何数据" + (f"（区间 {start} ~ {end}）" if start or end else ""),
             hint="检查符号与日期区间；首次拉取建议显式给 start",
         )
-    totals = store.update_bars(df, source=src.name)
+    totals = store.update_bars(df, freq=freq, source=src.name)
     summary = {}
     for symbol in sorted(totals):
         part = df[df["symbol"] == symbol]
@@ -282,6 +283,99 @@ def _run_backtest(
         "final_positions": result.final_positions,
         "artifacts": artifacts,
         "note": "完整净值/交易明细见 artifacts；对比历史实验用 compare_experiments",
+    }
+
+
+def _run_vectorized_backtest(
+    factor_file: str,
+    universe: list[str],
+    start: str,
+    end: str,
+    params: dict[str, Any] | None = None,
+    top: float = 0.2,
+    bottom: float = 0.2,
+    fee_rate: float = 1.5e-4,
+    warmup_bars: int = 250,
+    name: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    """向量化因子筛选：因子值 → 多空权重 → 净值（秒级，用于快速迭代）."""
+    import uuid
+
+    from solidrock.backtest.vectorized import vectorized_backtest, weights_from_factor
+    from solidrock.data.calendar import TradingCalendar
+    from solidrock.experiments.tracker import ExperimentTracker
+    from solidrock.factors import FactorData, load_factor_class
+
+    factor_cls = load_factor_class(factor_file)
+    factor = factor_cls(**(params or {}))
+    store = _store()
+    universe_list = [s.value for s in validate_symbols(universe)]
+    cal = TradingCalendar(store)
+    all_days = cal.days()
+    start_ts, end_ts = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+    eval_days = all_days[(all_days >= start_ts) & (all_days <= end_ts)]
+    if len(eval_days) == 0:
+        raise err(ErrorCode.NO_DATA, f"区间 {start}~{end} 内没有交易日", hint="检查区间或更新日历")
+    first_pos = int(all_days.searchsorted(eval_days[0]))
+    load_start = all_days[max(0, first_pos - max(warmup_bars, factor.lookback))]
+    bars = store.load_bars(universe_list, start=load_start, end=end_ts)
+    if bars.empty:
+        raise err(
+            ErrorCode.NO_DATA,
+            "universe 中没有本地数据",
+            hint="先执行 fetch_bars 更新数据",
+        )
+    data = FactorData.from_bars(bars)
+    values = factor.compute(data).reindex(pd.DatetimeIndex(eval_days))
+    close = data.hfq_close().reindex(pd.DatetimeIndex(eval_days))
+    weights = weights_from_factor(values, top=top, bottom=bottom)
+    result = vectorized_backtest(weights, close, fee_rate=fee_rate)
+    result.metrics["annual_turnover"] = float(result.turnover.mean() * 252)
+
+    run_id = f"bt-{pd.Timestamp.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    artifacts_dir = store.root / "runs" / run_id
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    config: dict[str, Any] = {
+        "start": str(start_ts.date()),
+        "end": str(end_ts.date()),
+        "universe": universe_list,
+        "top": top,
+        "bottom": bottom,
+        "fee_rate": fee_rate,
+        "data_snapshot": store.snapshot,
+    }
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "mode": "vectorized（逐日再平衡、收盘成交、单一费率，仅用于相对比较）",
+        "factor": factor.name,
+        "params": factor.params,
+        "config": config,
+        "metrics": result.metrics,
+    }
+    (artifacts_dir / "result.json").write_text(
+        json.dumps(json_safe(payload), ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+    result.nav.rename("nav").to_csv(artifacts_dir / "nav.csv")
+    weights.to_parquet(artifacts_dir / "weights.parquet")
+    tracker = ExperimentTracker(store.root / "experiments.db")
+    tracker.log_run(
+        kind="backtest",
+        name=name or f"[screen] {factor.name}",
+        config={**config, "mode": "vectorized", "factor": factor.name, "factor_params": factor.params},
+        metrics=result.metrics,
+        artifacts_dir=str(artifacts_dir),
+        data_snapshot=store.snapshot,
+        notes=notes,
+        run_id=run_id,
+    )
+    return {
+        "run_id": run_id,
+        "factor": factor.name,
+        "metrics": result.metrics,
+        "artifacts": [str(artifacts_dir / f) for f in ("result.json", "nav.csv", "weights.parquet")],
+        "data_snapshot": store.snapshot,
+        "note": "向量化口径用于相对比较；最终结论请用 run_backtest 事件引擎复核",
     }
 
 
@@ -392,9 +486,18 @@ def tool_fetch_bars(
     end: str | None = None,
     source: str | None = None,
     with_adj_factor: bool = True,
+    freq: str = "1d",
 ) -> str:
-    """[工具] 拉取/更新日线行情到本地（增量幂等）。"""
-    return _run_tool(_fetch_bars, symbols=symbols, start=start, end=end, source=source, with_adj_factor=with_adj_factor)
+    """[工具] 拉取/更新行情到本地（增量幂等）。freq：1d / 1m / 5m。"""
+    return _run_tool(
+        _fetch_bars,
+        symbols=symbols,
+        start=start,
+        end=end,
+        source=source,
+        with_adj_factor=with_adj_factor,
+        freq=freq,
+    )
 
 
 def tool_get_trading_calendar(
@@ -479,6 +582,36 @@ def tool_run_factor_analysis(
     )
 
 
+def tool_run_vectorized_backtest(
+    factor_file: str,
+    universe: list[str],
+    start: str,
+    end: str,
+    params: dict[str, Any] | None = None,
+    top: float = 0.2,
+    bottom: float = 0.2,
+    fee_rate: float = 1.5e-4,
+    name: str | None = None,
+) -> str:
+    """[工具] 向量化因子筛选：多空分层组合的快速净值（秒级，用于迭代筛选）.
+
+    与 run_factor_analysis 的区别：本工具直接给出"做多因子头部、做空尾部"
+    的组合净值与夏普，适合批量扫参数；精确结论用 run_backtest 复核。
+    """
+    return _run_tool(
+        _run_vectorized_backtest,
+        factor_file=factor_file,
+        universe=universe,
+        start=start,
+        end=end,
+        params=params,
+        top=top,
+        bottom=bottom,
+        fee_rate=fee_rate,
+        name=name,
+    )
+
+
 def tool_list_data_sources() -> str:
     """[工具] 列出可用数据源及其能力。"""
 
@@ -501,4 +634,5 @@ ALL_TOOLS: dict[str, Any] = {
     "get_experiment": tool_get_experiment,
     "compare_experiments": tool_compare_experiments,
     "run_factor_analysis": tool_run_factor_analysis,
+    "run_vectorized_backtest": tool_run_vectorized_backtest,
 }

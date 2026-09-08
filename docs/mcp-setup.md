@@ -46,12 +46,15 @@ srq mcp serve                # stdio 模式，接入真实客户端
 | 工具 | 作用 |
 |------|------|
 | `get_data_overview` | 本地数据总览（行情/日历/快照/实验） |
+| `data_health` | 数据体检（缺失/异常/因子缺失/大幅波动） |
 | `list_data_sources` | 可用数据源与能力 |
 | `search_instruments` | 按代码/名称搜标的 |
-| `fetch_bars` | 拉取/更新日线（增量幂等） |
+| `fetch_bars` | 拉取/更新行情（1d/1m/5m，增量幂等） |
 | `get_trading_calendar` | 查询/更新交易日历 |
 | `validate_strategy` | 策略静态检查（前视偏差/API 误用） |
 | `run_backtest` | 运行回测（自动校验 + 留痕） |
+| `run_factor_analysis` | 因子分析（RankIC + 分层） |
+| `run_vectorized_backtest` | 向量化因子筛选（快速净值） |
 | `list_experiments` / `get_experiment` / `compare_experiments` | 实验追踪查询与对比 |
 
 ## 返回信封

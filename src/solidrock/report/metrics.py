@@ -65,11 +65,15 @@ def compute_metrics(
     if trades is not None and len(trades) > 0:
         out["n_trades"] = float(len(trades))
         out["total_fees"] = _safe_float(trades["fees"].sum())
-        sells = trades[(trades["side"] == "sell") & trades["pnl"].notna()]
-        if len(sells) > 0:
-            out["trade_win_rate"] = _safe_float((sells["pnl"] > 0).mean())
-            gains = _safe_float(sells.loc[sells["pnl"] > 0, "pnl"].sum())
-            losses = _safe_float(-sells.loc[sells["pnl"] < 0, "pnl"].sum())
+        # 平仓方向的成交才计胜率（期货的"卖出"可能是开空，pnl=-费用会污染统计）
+        if "closing" in trades.columns:
+            closed = trades[trades["closing"] & trades["pnl"].notna()]
+        else:
+            closed = trades[(trades["side"] == "sell") & trades["pnl"].notna()]
+        if len(closed) > 0:
+            out["trade_win_rate"] = _safe_float((closed["pnl"] > 0).mean())
+            gains = _safe_float(closed.loc[closed["pnl"] > 0, "pnl"].sum())
+            losses = _safe_float(-closed.loc[closed["pnl"] < 0, "pnl"].sum())
             out["profit_factor"] = _safe_float(gains / losses) if losses > 1e-12 else float("inf") if gains > 0 else 0.0
         # 年化换手率：双边成交额 / 2 / 平均净值 / 年
         if n > 1:

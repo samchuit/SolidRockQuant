@@ -58,10 +58,10 @@
 - [x] **因子模块完整版**：FactorData 面板 + Factor 基类、MAD/分位数去极值、zscore、排名、行业市值中性化（回归取残差）、RankIC/ICIR/t 值、分位数分层回测、多空价差、因子自相关；CLI `srq factor analyze`、MCP `run_factor_analysis`、实验留痕（kind=factor）、示例 momentum_factor
 - [x] **期货回测支持**：合约规格表（乘数/保证金/开平今费率/涨跌停，可覆盖）、带符号双向持仓（开/平/翻转）、平今拆分费率、保证金约束、到期强平（近似到期日）、主连换月比例复权工具（`roll_adjust_continuous`）、示例 futures_short
 - [x] **数据体检**：`srq data doctor` + MCP `data_health`——缺失交易日/OHLC 异常/因子缺失/零成交连段/大幅波动
-- [ ] 分钟线支持（AKShare/Tushare 分钟数据，存储分区扩展）
-- [ ] Baostock 适配器
-- [ ] 向量化快速回测通道（大范围因子筛选用）
-- [ ] 期货指标语义细化（交易胜率按开/平方向区分）
+- [x] **分钟线支持**：`1m`/`5m` 贯通 schema/存储/适配器/CLI/MCP；AKShare（东财+新浪回退+期货分钟）、Tushare（stk_mins）、Baostock（5 分钟）；分钟数据仅供研究，事件回测仍为日频
+- [x] **Baostock 适配器**：A股日线（双取数推导因子）、交易日历、指数成分股、5 分钟线
+- [x] **向量化快速回测通道**：`vectorized_backtest` + `weights_from_factor`（多空分位、防前视、换手费率）；CLI `srq factor screen`、MCP `run_vectorized_backtest`
+- [x] 期货指标语义细化（`closing` 字段区分开/平，胜率/盈亏比只按平仓计）
 
 ## v0.3 —— 走向实盘
 

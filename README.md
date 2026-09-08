@@ -23,13 +23,13 @@ SolidRockQuant 从第一天起就为 LLM Agent 设计：**MCP Server 是一等�
 ## 核心特性
 
 ### 🤖 Agent 原生
-- **MCP Server**（`srq mcp serve`）：数据获取、回测、因子分析、实验查询共 11 个工具，Claude 等 LLM 客户端即插即用
+- **MCP Server**（`srq mcp serve`）：数据获取、回测、因子分析、实验查询共 13 个工具，Claude 等 LLM 客户端即插即用
 - **结构化输出**：统一 JSON 信封 + Markdown 报告；错误码稳定且必带可执行的修复 hint
 - **前视偏差检测**：`shift(-n)`、`bfill`、幻觉 API 等 LLM 常见错误的 AST 静态检查，回测前自动拦截
 - **确定性可复现**：无随机性引擎 + 数据版本快照，同一实验永远得到同一结果
 
 ### 📊 数据层
-- 可插拔数据源：AKShare（东财主通道 + 新浪自动回退）、Tushare Pro，架构预留 Wind 等商业接口
+- 可插拔数据源：AKShare（东财主通道 + 新浪自动回退）、Tushare Pro、Baostock，架构预留 Wind 等商业接口；日线 + 分钟线（1m/5m）
 - 统一数据规范：原始价 + 后复权因子（前复权价会随除权漂移，破坏复现性，故不落库）、交易日历、股票/期货合约/主连/指数/ETF
 - 本地缓存：Parquet 原子写入 + DuckDB 参数化读取，增量更新幂等
 
@@ -104,7 +104,7 @@ srq data snapshot create snap-20260908    # 数据版本快照（实验复现）
 }
 ```
 
-Claude 等 Agent 即可获得 11 个工具，研究闭环无需人工干预。详细配置见 [docs/mcp-setup.md](docs/mcp-setup.md)，Agent 操作指南见 `src/solidrock/agent/skills/`。
+Claude 等 Agent 即可获得 13 个工具，研究闭环无需人工干预。详细配置见 [docs/mcp-setup.md](docs/mcp-setup.md)，Agent 操作指南见 `src/solidrock/agent/skills/`。
 
 ## 项目结构
 

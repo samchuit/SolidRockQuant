@@ -417,6 +417,7 @@ class BacktestEngine:
                     "fees": result.fees,
                     "cash_after": state.portfolio.cash,
                     "pnl": pnl,
+                    "closing": result.close_qty > 0,
                 }
             )
 
@@ -493,6 +494,7 @@ class BacktestEngine:
                     "fees": 0.0,
                     "cash_after": state.portfolio.cash,
                     "pnl": pnl,
+                    "closing": True,
                 }
             )
 

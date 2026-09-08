@@ -86,12 +86,23 @@ def empty_bars_frame() -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
+SUPPORTED_FREQS = ("1d", "1m", "5m")
+
+
+def validate_bars(df: pd.DataFrame, *, freq: str = "1d") -> pd.DataFrame:
     """校验并规范化为标准 schema；不合格抛 ``DATA_FORMAT_INVALID``（带 hint）.
 
     做的事：检查必需列、转换 dtype（date 接受 date/str、数值列宽转换）、
     排序（symbol, date）、重置索引；并做硬性 OHLC 逻辑检查（high < low 直接判坏数据）。
+
+    ``freq``：``1d`` 将 date 归一到零点；分钟频率（``1m``/``5m``）保留日内时间戳
+    （向下取整到分钟）。
     """
+    if freq not in SUPPORTED_FREQS:
+        raise err(
+            ErrorCode.PARAM_INVALID,
+            f"freq 仅支持 {list(SUPPORTED_FREQS)}，收到 {freq!r}",
+        )
     if not isinstance(df, pd.DataFrame):
         raise err(
             ErrorCode.DATA_FORMAT_INVALID,
@@ -139,7 +150,10 @@ def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
             f"date 列存在 {bad} 个无法解析的值",
             hint="检查源数据日期格式是否统一",
         )
-    out["date"] = out["date"].dt.normalize()
+    if freq == "1d":
+        out["date"] = out["date"].dt.normalize()
+    else:
+        out["date"] = out["date"].dt.floor("min")
     # 归一到 ns：pandas 3 的 to_datetime 默认 us，跨单位比较在 pandas 下会出问题
     out["date"] = out["date"].astype("datetime64[ns]")
     # 数值列

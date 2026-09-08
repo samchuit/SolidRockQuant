@@ -68,8 +68,14 @@ class TestBaseFlows:
     def test_freq_restricted(self, stub_registered) -> None:
         src = create_source("stub")
         with pytest.raises(SolidRockError) as exc_info:
-            src.fetch_bars("000001.SZ", freq="1m")
+            src.fetch_bars("000001.SZ", freq="2h")
         assert exc_info.value.code is ErrorCode.PARAM_INVALID
+
+    def test_minute_capability_guard(self, stub_registered) -> None:
+        src = create_source("stub")  # stub 未声明分钟能力
+        with pytest.raises(SolidRockError) as exc_info:
+            src.fetch_bars("000001.SZ", freq="1m")
+        assert exc_info.value.code is ErrorCode.CAPABILITY_NOT_SUPPORTED
 
     def test_capability_guard(self, stub_registered) -> None:
         src = create_source("stub")
