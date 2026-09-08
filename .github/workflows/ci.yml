@@ -12,15 +12,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
         with:
-          python-version: "3.12"
+          enable-cache: true
+      - name: Create venv（避免系统 Python 的 PEP 668 限制）
+        run: uv venv --python 3.12
       - name: Install
-        run: uv pip install --system -e ".[dev]"
+        run: uv pip install -e ".[dev]"
       - name: Ruff lint
-        run: ruff check src tests
+        run: uv run ruff check src tests
       - name: Ruff format
-        run: ruff format --check src tests
+        run: uv run ruff format --check src tests
       - name: Mypy
-        run: mypy src/solidrock
+        run: uv run mypy src/solidrock
 
   test:
     runs-on: ubuntu-latest
@@ -32,15 +34,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Create venv
+        run: uv venv --python ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install --system -e ".[dev]"
+        run: uv pip install -e ".[dev]"
       - name: Pytest（网络冒烟测试默认跳过）
-        run: pytest -m "not network" --cov --cov-report=term-missing
+        run: uv run pytest -m "not network" --cov --cov-report=term-missing
       - name: CLI smoke
         run: |
-          srq --help
-          srq data --help
-          srq backtest --help
-          srq mcp serve --help
-          python -c "import solidrock; print('solidrock', solidrock.__version__)"
+          uv run srq --help
+          uv run srq data --help
+          uv run srq backtest --help
+          uv run srq mcp serve --help
+          uv run python -c "import solidrock; print('solidrock', solidrock.__version__)"

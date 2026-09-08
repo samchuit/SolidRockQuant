@@ -3,10 +3,15 @@
 ## 前置（一次性）
 
 1. **PyPI / TestPyPI 账号**：注册并启用 2FA；
-2. **Trusted Publishing**（推荐，免 token）：
-   - TestPyPI：账号设置 → Publishing → 添加 GitHub 项目，environment 填 `testpypi`；
-   - PyPI：同样添加，environment 填 `pypi`；
-3. **GitHub Environments**：仓库 Settings → Environments → 创建 `testpypi` 与 `pypi`（pypi 建议加手动审批保护）。
+2. **Trusted Publishing**（免 token）：
+   - 登录 https://testpypi.python.org → Account Settings → Publishing →
+     **Add a new pending publisher**：
+     - PyPI project name: `solidrock-quant`
+     - Owner: `samchuit`，Repository: `SolidRockQuant`
+     - Workflow: `release.yml`，Environment: **留空**
+   - PyPI 正式站同样添加一份；
+3. 正式发布如需人工审批，在 GitHub 仓库 Settings→Environments 创建 `pypi`
+   环境并加必选审批人（工作流的 pypi job 已改为 workflow_dispatch 手动触发）。
 
 ## 发布步骤
 
