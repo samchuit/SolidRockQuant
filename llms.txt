@@ -1,0 +1,31 @@
+# SolidRockQuant · 磐石智擎
+
+> Agent 原生的量化研究与回测框架（A股/期货）。MIT 生态里的差异化：MCP Server 是一等公民接口，实验自动留痕，数据可版本化，报错自带修复建议。
+
+## 模块地图
+
+- `solidrock.data`：数据层。`create_source(name)` 数据源（akshare/tushare，可插拔）、`DataStore` 本地仓库（Parquet+DuckDB、增量更新、版本快照）、`TradingCalendar` 交易日历、`parse_symbol` 符号规范（`000001.SZ` / `RB2505.SHFE` / 主连 `RB.SHFE`）。
+- `solidrock.backtest`：回测。`BacktestEngine(strategy, config, store).run()` 事件驱动引擎；A股规则内置（T+1、涨跌停、整手、佣金/印花税/滑点）；默认 `next_open` 防前视执行。
+- `solidrock.strategy`：`Strategy` 基类（params 声明 + setup/on_signal 钩子）、Context API（order/order_target_percent/history/portfolio）。
+- `solidrock.report`：绩效指标（年化/夏普/回撤/卡玛/胜率/换手/基准对比）、Markdown + JSON 报告。
+- `solidrock.experiments`：SQLite 实验追踪（log_run/list/get/compare）——Agent 迭代的记忆。
+- `solidrock.agent`：MCP Server（`srq mcp serve`）、策略静态校验（前视偏差/幻觉 API 检测）、SKILL.md 操作指南。
+
+## 数据规范（全库唯一口径）
+
+- 存储：原始价 + 后复权因子（hfq = close × adj_factor），不做前复权落库；
+- volume 单位 = 手，amount 单位 = 元；pre_close 为除权后口径；
+- 日线标准列：symbol, date, open, high, low, close, pre_close, volume, amount, turnover_rate, adj_factor, suspended（期货另含 settle, open_interest）。
+
+## MCP 工具（`srq mcp serve`，统一 JSON 信封）
+
+get_data_overview / list_data_sources / search_instruments / fetch_bars / get_trading_calendar / validate_strategy / run_backtest / list_experiments / get_experiment / compare_experiments
+
+## 错误约定
+
+所有错误为 `SolidRockError`，携带稳定错误码（`NO_DATA`、`LOOKAHEAD_SUSPECTED`、`SYMBOL_INVALID`…）与可执行 `hint`。Agent 应读 hint 自纠错。
+
+## 文档
+
+- 设计：docs/design.md；路线图：docs/roadmap.md；MCP 接入：docs/mcp-setup.md
+- 技能文件：src/solidrock/agent/skills/（回测流程 / 数据更新 / 实验对比）

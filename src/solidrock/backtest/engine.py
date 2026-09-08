@@ -1,0 +1,434 @@
+"""事件驱动回测引擎（bar 级、日频）.
+
+每个交易日的处理顺序（``next_open`` 默认模式）::
+
+    1. 公司行为调整（复权因子变化 → 持仓价值守恒调整）
+    2. T+1 解锁（昨日买入今日可卖）
+    3. 撮合昨日信号（今日开盘价、涨跌停/整手/资金约束）
+    4. 更新收盘价 → 逐日盯市（净值曲线）
+    5. 回撤熔断检查（触发则次日清仓）
+    6. 策略 on_signal（看到含当日的数据，产出的订单明日撮合）
+
+``same_close`` 模式把第 3、6 步合并到当日收盘，供快速研究（报告会标注）。
+
+设计约定：
+- 引擎运行在 **raw 价格空间**（真实货币），费用/涨跌停/资金约束全部正确口径；
+- 订单只对下一根 bar 有效，停牌或拒单即过期（不做复杂委托生命周期）；
+- 全程无随机性：同一数据快照 + 同一配置 ⇒ 结果完全一致。
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+import pandas as pd
+
+from solidrock.agent.errors import ErrorCode, err
+from solidrock.backtest.config import BacktestConfig
+from solidrock.backtest.context import Context
+from solidrock.backtest.costs import AShareCostModel
+from solidrock.backtest.matching import ExecutionSimulator, Order
+from solidrock.backtest.portfolio import Portfolio
+from solidrock.data.calendar import TradingCalendar
+from solidrock.data.symbols import validate_symbols
+from solidrock.risk.checks import DrawdownHalt, PositionWeightCap
+from solidrock.strategy.base import Strategy
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from solidrock.data.store import DataStore
+
+_TRADING_DAYS_PER_YEAR = 252
+
+
+@dataclass
+class EngineState:
+    """引擎内部可变状态（Context 持有只读引用）."""
+
+    dates: list[pd.Timestamp]
+    panel: dict[str, pd.DataFrame]
+    now: pd.Timestamp = None  # type: ignore[assignment]
+    now_idx: int = -1
+    params: dict = field(default_factory=dict)
+    portfolio: Portfolio = None  # type: ignore[assignment]
+    last_prices: dict[str, float] = field(default_factory=dict)
+    pending: list[Order] = field(default_factory=list)
+    rejections: list[dict] = field(default_factory=list)
+    halted: bool = False
+
+    def queue_order(self, order: Order) -> None:
+        if self.halted and order.source == "strategy":
+            self.rejections.append(
+                {"date": self.now, "symbol": order.symbol, "side": order.side, "qty": order.qty, "code": "HALTED"}
+            )
+            return
+        self.pending.append(order)
+
+
+@dataclass
+class BacktestResult:
+    """回测结果."""
+
+    run_id: str
+    strategy_name: str
+    config: BacktestConfig
+    nav: pd.DataFrame  # date, total, cash, market_value
+    trades: pd.DataFrame
+    rejections: pd.DataFrame
+    corporate_actions: pd.DataFrame
+    metrics: dict
+    benchmark: pd.Series | None
+    strategy_logs: list[str]
+    data_snapshot: str | None
+    artifacts_dir: Path | None
+    final_positions: dict[str, dict] = None  # type: ignore[assignment]  # {symbol: {shares, avg_cost, last_price}}
+
+    def summary(self) -> dict:
+        """关键指标摘要（供 CLI/MCP 打印）。"""
+        return {
+            "run_id": self.run_id,
+            "strategy": self.strategy_name,
+            "metrics": self.metrics,
+            "data_snapshot": self.data_snapshot,
+            "artifacts_dir": str(self.artifacts_dir) if self.artifacts_dir else None,
+        }
+
+
+class BacktestEngine:
+    """回测引擎.
+
+    用法::
+
+        engine = BacktestEngine(DualMA, BacktestConfig(start="2024-01-01", end="2025-12-31"), store)
+        result = engine.run()
+        result.metrics["sharpe"]
+    """
+
+    def __init__(
+        self,
+        strategy: Strategy | type[Strategy],
+        config: BacktestConfig,
+        store: DataStore,
+    ) -> None:
+        self.config = config
+        self.store = store
+        self._strategy = strategy
+
+    # ------------------------------------------------------------------ 入口
+    def run(self) -> BacktestResult:
+        cfg = self.config
+        strategy = self._strategy if isinstance(self._strategy, Strategy) else self._strategy()
+        if cfg.cost_model is None:
+            cfg.cost_model = AShareCostModel()
+        self._trade_records: list[dict] = []
+
+        # --- 日历与日期切分（含 warmup） ---
+        cal = TradingCalendar(self.store)
+        all_days = cal.days()
+        start_ts, end_ts = pd.Timestamp(cfg.start).normalize(), pd.Timestamp(cfg.end).normalize()
+        if start_ts > end_ts:
+            raise err(ErrorCode.PARAM_INVALID, f"回测区间倒置：{start_ts.date()} > {end_ts.date()}")
+        mask = (all_days >= start_ts) & (all_days <= end_ts)
+        day_index = all_days[mask]
+        if len(day_index) == 0:
+            raise err(
+                ErrorCode.NO_DATA,
+                f"回测区间 {start_ts.date()}~{end_ts.date()} 内没有交易日",
+                hint="检查区间或先更新交易日历（srq data calendar --update）",
+            )
+        first_pos = int(all_days.searchsorted(day_index[0]))
+        warmup_start = all_days[max(0, first_pos - cfg.warmup_bars)]
+        loaded_days = all_days[all_days >= warmup_start]
+        loaded_days = loaded_days[loaded_days <= end_ts]
+
+        # --- setup（设置 universe）与数据加载 ---
+        portfolio = Portfolio(initial_cash=cfg.initial_cash, cash=cfg.initial_cash)
+        state = EngineState(dates=list(loaded_days), panel={}, params=strategy.params, portfolio=portfolio)
+        ctx = Context(state)
+        state.now = loaded_days[0]
+        strategy.setup(ctx)
+        if not ctx.universe:
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                "策略未设置 ctx.universe",
+                hint="在 setup() 中设置 ctx.universe = ['510300.SH', ...]",
+            )
+        universe = [s.value for s in validate_symbols(ctx.universe)]
+        benchmark = None
+        if cfg.benchmark is not None:
+            benchmark = validate_symbols([cfg.benchmark])[0].value
+        symbols = sorted(set(universe) | ({benchmark} if benchmark else set()))
+
+        data = self.store.load_bars(symbols, start=warmup_start, end=end_ts)
+        panel: dict[str, pd.DataFrame] = {}
+        for symbol, part in data.groupby("symbol"):
+            frame = part.drop(columns=["symbol"]).set_index("date").sort_index()
+            panel[str(symbol)] = frame
+        missing = [s for s in universe if s not in panel]
+        if missing:
+            raise err(
+                ErrorCode.NO_DATA,
+                f"universe 中 {len(missing)} 个标的无本地数据：{missing[:5]}{'...' if len(missing) > 5 else ''}",
+                hint="先执行 srq data update --symbols <符号> --start <回测起点往前 warmup 天>",
+                details={"missing": missing},
+            )
+        state.panel = panel
+
+        # --- 主循环 ---
+        simulator = ExecutionSimulator(
+            cfg.cost_model or AShareCostModel(),
+            mode=cfg.execution,
+            limit_ratio_overrides=cfg.limit_ratio_overrides,
+            round_lot=cfg.round_lot,
+        )
+        weight_cap = PositionWeightCap(cfg.max_position_weight) if cfg.max_position_weight else None
+        halt = DrawdownHalt(cfg.drawdown_halt) if cfg.drawdown_halt else None
+
+        nav_rows: list[dict] = []
+        last_factor: dict[str, float] = {}
+        corp_actions: list[dict] = []
+
+        backtest_days = [d for d in loaded_days if d >= day_index[0]]
+        for day in backtest_days:
+            state.now = day
+            state.now_idx = int(loaded_days.searchsorted(day))
+            today_bars = {s: panel[s].loc[day] for s in panel if day in panel[s].index}
+
+            # 1) 公司行为：复权因子变化 → 持仓调整
+            for symbol, bar in today_bars.items():
+                factor = bar["adj_factor"]
+                if pd.isna(factor):
+                    continue
+                factor = float(factor)
+                prev = last_factor.get(symbol)
+                if prev is not None and abs(factor / prev - 1.0) > 1e-9:
+                    ratio = factor / prev
+                    pos = portfolio.position(symbol)
+                    if pos.shares > 0:
+                        before = pos.shares
+                        portfolio.apply_corporate_action(symbol, ratio)
+                        corp_actions.append({"date": day, "symbol": symbol, "ratio": ratio, "shares_before": before})
+                last_factor[symbol] = factor
+
+            # 2) T+1 解锁
+            portfolio.release_available()
+
+            if cfg.execution == "next_open":
+                # 3) 撮合昨日信号（开盘价）
+                self._execute_pending(state, simulator, day, today_bars, weight_cap)
+                # 4) 更新收盘价 + 盯市
+                self._update_closes(state, today_bars)
+                nav = portfolio.total_value(state.last_prices)
+                nav_rows.append(self._nav_row(day, nav, portfolio, state))
+                # 5) 熔断
+                if halt is not None and halt.check(nav, day):
+                    state.halted = True
+                    self._queue_liquidation(state, day)
+                # 6) 策略信号
+                strategy.on_signal(ctx)
+            else:  # same_close
+                self._update_closes(state, today_bars)
+                strategy.on_signal(ctx)
+                self._execute_pending(state, simulator, day, today_bars, weight_cap)
+                nav = portfolio.total_value(state.last_prices)
+                nav_rows.append(self._nav_row(day, nav, portfolio, state))
+                if halt is not None and halt.check(nav, day):
+                    state.halted = True
+                    self._queue_liquidation(state, day)
+
+        # 收尾：on_stop 产生的订单与未执行订单一并记为 NO_MORE_BARS
+        strategy.on_stop(ctx)
+        for order in state.pending:
+            state.rejections.append(
+                {
+                    "date": state.now,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "qty": order.qty,
+                    "code": "NO_MORE_BARS",
+                }
+            )
+        state.pending.clear()
+
+        nav_df = (
+            pd.DataFrame(nav_rows).set_index("date")
+            if nav_rows
+            else pd.DataFrame(columns=["total", "cash", "market_value"])
+        )
+        trades_df = pd.DataFrame(self._trade_records)
+        rejections_df = pd.DataFrame(state.rejections)
+        corp_df = pd.DataFrame(corp_actions)
+        benchmark_series = self._benchmark_series(panel, benchmark, loaded_days, day_index[0])
+
+        from solidrock.report.metrics import compute_metrics
+
+        metrics = compute_metrics(
+            nav_df["total"] if not nav_df.empty else pd.Series(dtype="float64"),
+            benchmark_series,
+            trades_df if not trades_df.empty else None,
+        )
+
+        result = BacktestResult(
+            run_id=f"bt-{pd.Timestamp.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}",
+            strategy_name=type(strategy).__name__,
+            config=cfg,
+            nav=nav_df,
+            trades=trades_df,
+            rejections=rejections_df,
+            corporate_actions=corp_df,
+            metrics=metrics,
+            benchmark=benchmark_series,
+            strategy_logs=ctx.logs,
+            data_snapshot=self.store.snapshot,
+            artifacts_dir=None,
+            final_positions={
+                symbol: {
+                    "shares": pos.shares,
+                    "avg_cost": pos.avg_cost,
+                    "last_price": pos.last_price,
+                }
+                for symbol, pos in portfolio.positions.items()
+                if pos.shares > 0
+            },
+        )
+        if cfg.log_experiment:
+            self._log_experiment(result)
+        return result
+
+    # ------------------------------------------------------------------ 内部
+    def _update_closes(self, state: EngineState, today_bars: dict[str, pd.Series]) -> None:
+        for symbol, bar in today_bars.items():
+            close = bar["close"]
+            if not pd.isna(close):
+                state.last_prices[symbol] = float(close)
+
+    def _execute_pending(
+        self,
+        state: EngineState,
+        simulator: ExecutionSimulator,
+        day: pd.Timestamp,
+        today_bars: dict[str, pd.Series],
+        weight_cap: PositionWeightCap | None,
+    ) -> None:
+        pending, state.pending = state.pending, []
+        for order in pending:
+            bar = today_bars.get(order.symbol)
+            if bar is None:
+                state.rejections.append(
+                    {"date": day, "symbol": order.symbol, "side": order.side, "qty": order.qty, "code": "SUSPENDED"}
+                )
+                continue
+            if order.side == "buy" and weight_cap is not None:
+                ref = float(bar["open" if simulator.mode == "next_open" else "close"])
+                total_value = state.portfolio.total_value(state.last_prices)
+                capped = weight_cap.cap_qty(order.symbol, order.qty, ref, total_value)
+                if capped < order.qty:
+                    state.rejections.append(
+                        {
+                            "date": day,
+                            "symbol": order.symbol,
+                            "side": order.side,
+                            "qty": order.qty - capped,
+                            "code": "WEIGHT_CAP",
+                        }
+                    )
+                    order = Order(order.symbol, order.side, capped, order.created_at, order.source)
+                    if order.qty <= 0:
+                        continue
+            result = simulator.simulate_fill(order, bar, state.portfolio)
+            if result.rejected:
+                state.rejections.append(
+                    {
+                        "date": day,
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "qty": order.qty,
+                        "code": result.rejected,
+                    }
+                )
+                continue
+            if order.side == "buy":
+                state.portfolio.buy(order.symbol, result.filled_qty, result.price, result.fees)
+                pnl = None
+            else:
+                trade = state.portfolio.sell(order.symbol, result.filled_qty, result.price, result.fees)
+                pnl = trade.pnl
+            self._trade_records.append(
+                {
+                    "date": day,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "qty": result.filled_qty,
+                    "price": result.price,
+                    "value": result.value,
+                    "fees": result.fees,
+                    "cash_after": state.portfolio.cash,
+                    "pnl": pnl,
+                }
+            )
+
+    def _queue_liquidation(self, state: EngineState, day: pd.Timestamp) -> None:
+        for symbol in state.portfolio.position_symbols:
+            state.queue_order(
+                Order(
+                    symbol=symbol,
+                    side="sell",
+                    qty=state.portfolio.position(symbol).shares,
+                    created_at=day,
+                    source="risk_liquidate",
+                )
+            )
+
+    @staticmethod
+    def _nav_row(day: pd.Timestamp, nav: float, portfolio: Portfolio, state: EngineState) -> dict:
+        market_value = portfolio.market_value(state.last_prices)
+        return {"date": day, "total": nav, "cash": portfolio.cash, "market_value": market_value}
+
+    def _benchmark_series(
+        self,
+        panel: dict[str, pd.DataFrame],
+        benchmark: str | None,
+        loaded_days: pd.DatetimeIndex,
+        first_backtest_day: pd.Timestamp,
+    ) -> pd.Series | None:
+        if benchmark is None or benchmark not in panel:
+            return None
+        frame = panel[benchmark]
+        # 用后复权收盘（因子=1 的指数即原始收盘），以回测起始日前最后一个收盘为基准 1.0；
+        # 无更早数据（warmup 不足）时退化为区间首日
+        hfq_close = (frame["close"] * frame["adj_factor"].fillna(1.0)).dropna()
+        base_idx = hfq_close.index[hfq_close.index < first_backtest_day]
+        window = hfq_close[(hfq_close.index >= first_backtest_day) & (hfq_close.index <= loaded_days[-1])]
+        if window.empty:
+            return None
+        base = hfq_close.loc[base_idx[-1]] if not base_idx.empty else window.iloc[0]
+        return window / base
+
+    def _log_experiment(self, result: BacktestResult) -> None:
+        from solidrock.experiments.tracker import ExperimentTracker
+
+        artifacts_dir = self.store.root / "runs" / result.run_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        from solidrock.report.json_report import write_result_json
+        from solidrock.report.markdown import write_report_markdown
+
+        write_report_markdown(result, artifacts_dir / "report.md")
+        write_result_json(result, artifacts_dir / "result.json")
+        result.trades.to_csv(artifacts_dir / "trades.csv", index=False)
+        result.nav.to_csv(artifacts_dir / "nav.csv")
+        result.artifacts_dir = artifacts_dir
+
+        tracker = ExperimentTracker(self.store.root / "experiments.db")
+        tracker.log_run(
+            kind="backtest",
+            name=result.config.name or result.strategy_name,
+            config=result.config.to_dict(),
+            metrics=result.metrics,
+            artifacts_dir=str(artifacts_dir),
+            data_snapshot=result.data_snapshot,
+            notes=result.config.notes,
+            run_id=result.run_id,
+        )

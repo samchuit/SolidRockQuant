@@ -1,0 +1,100 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "solidrock-quant"
+version = "0.1.0.dev0"
+description = "SolidRockQuant · 磐石智擎 — Agent 原生的量化研究与回测框架"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "SolidRockQuant Contributors" }]
+keywords = ["quant", "backtest", "trading", "ai-agent", "mcp", "akshare", "tushare"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "duckdb>=1.0",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+sources = ["akshare>=1.14", "tushare>=1.4"]
+mcp = ["mcp>=1.2"]
+report = ["plotly>=5.18"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+srq = "solidrock.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/solidrock"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "docs", "README.md", "docs/*.md"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+# 中文文档项目：全角标点在 docstring/注释/字符串中大量使用，属误报
+# RUF012 与公共 API 冲突：Strategy.params 类属性即参数声明接口（可变类属性是有意设计）
+ignore = ["RUF001", "RUF002", "RUF003", "RUF012"]
+# RUF012 与公共 API 冲突：Strategy.params 类属性即参数声明接口（可变类属性是有意设计）
+
+[tool.ruff.lint.flake8-bugbear]
+# typer 的 Option/Argument 在参数默认值中调用是官方推荐写法
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.mypy]
+# 不固定 python_version：numpy 新版类型桩使用 type 语句，需要跟随运行解释器；
+# 3.10 运行时兼容由 CI test 矩阵与 ruff target-version=py310 保证
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+# 渐进启用 strict；v0.1 先保证核心模块无 any 泄漏大问题
+exclude = ["build", "dist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "network: 需要真实网络与数据源的冒烟测试（默认跳过，用 -m network 显式运行）",
+]
+
+[tool.coverage.run]
+source = ["src/solidrock"]
