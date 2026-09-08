@@ -30,7 +30,7 @@ from solidrock.data.symbols import AssetType, Symbol, parse_symbol
 from solidrock.factors import Factor, FactorData, analyze_factor
 from solidrock.strategy.base import Strategy
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AssetType",
