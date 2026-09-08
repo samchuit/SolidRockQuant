@@ -10,7 +10,7 @@
 
 1. **PyPI / TestPyPI 账号**：注册并启用 2FA；
 2. **Trusted Publishing**（免 token）：
-   - 登录 https://testpypi.python.org → Account Settings → Publishing →
+   - 登录 https://test.pypi.org → Account Settings → Publishing →
      **Add a new pending publisher**：
      - PyPI project name: `solidrock-quant`
      - Owner: `samchuit`，Repository: `SolidRockQuant`
@@ -32,7 +32,7 @@ uv build && uv pip install twine && twine check dist/*
 git tag v0.1.0 && git push origin v0.1.0
 
 # 4. TestPyPI 验证
-pip install --index-url https://testpypi.python.org/simple \
+pip install --index-url https://test.pypi.org/simple \
     --extra-index-url https://pypi.org/simple "solidrock-quant[mcp,sources]"
 srq --help && python -c "import solidrock"
 
