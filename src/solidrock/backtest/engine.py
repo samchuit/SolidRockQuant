@@ -28,11 +28,12 @@ import pandas as pd
 from solidrock.agent.errors import ErrorCode, err
 from solidrock.backtest.config import BacktestConfig
 from solidrock.backtest.context import Context
-from solidrock.backtest.costs import AShareCostModel
+from solidrock.backtest.costs import AShareCostModel, FuturesCostModel
 from solidrock.backtest.matching import ExecutionSimulator, Order
 from solidrock.backtest.portfolio import Portfolio
 from solidrock.data.calendar import TradingCalendar
-from solidrock.data.symbols import validate_symbols
+from solidrock.data.futures import contract_expiry, get_contract_spec
+from solidrock.data.symbols import parse_symbol, validate_symbols
 from solidrock.risk.checks import DrawdownHalt, PositionWeightCap
 from solidrock.strategy.base import Strategy
 
@@ -177,12 +178,20 @@ class BacktestEngine:
             )
         state.panel = panel
 
+        # --- 期货：合约规格/乘数/费用模型（品种路由依据） ---
+        futures_symbols = [s for s in symbols if parse_symbol(s).is_futures]
+        spec_map = {s: get_contract_spec(s, cfg.futures_spec_overrides) for s in futures_symbols}
+        portfolio.multipliers = {s: spec.multiplier for s, spec in spec_map.items()}
+        if futures_symbols and cfg.futures_cost_model is None:
+            cfg.futures_cost_model = FuturesCostModel()
+
         # --- 主循环 ---
         simulator = ExecutionSimulator(
             cfg.cost_model or AShareCostModel(),
             mode=cfg.execution,
             limit_ratio_overrides=cfg.limit_ratio_overrides,
             round_lot=cfg.round_lot,
+            futures_cost_model=cfg.futures_cost_model,
         )
         weight_cap = PositionWeightCap(cfg.max_position_weight) if cfg.max_position_weight else None
         halt = DrawdownHalt(cfg.drawdown_halt) if cfg.drawdown_halt else None
@@ -190,6 +199,7 @@ class BacktestEngine:
         nav_rows: list[dict] = []
         last_factor: dict[str, float] = {}
         corp_actions: list[dict] = []
+        opened_today: dict[str, float] = {}  # 期货：当日开仓手数（平今费率拆分）
 
         backtest_days = [d for d in loaded_days if d >= day_index[0]]
         for day in backtest_days:
@@ -197,7 +207,7 @@ class BacktestEngine:
             state.now_idx = int(loaded_days.searchsorted(day))
             today_bars = {s: panel[s].loc[day] for s in panel if day in panel[s].index}
 
-            # 1) 公司行为：复权因子变化 → 持仓调整
+            # 1) 公司行为：复权因子变化 → 持仓调整（主连换月比例复权同样走这里）
             for symbol, bar in today_bars.items():
                 factor = bar["adj_factor"]
                 if pd.isna(factor):
@@ -207,18 +217,22 @@ class BacktestEngine:
                 if prev is not None and abs(factor / prev - 1.0) > 1e-9:
                     ratio = factor / prev
                     pos = portfolio.position(symbol)
-                    if pos.shares > 0:
+                    if abs(pos.shares) > 1e-9:
                         before = pos.shares
                         portfolio.apply_corporate_action(symbol, ratio)
                         corp_actions.append({"date": day, "symbol": symbol, "ratio": ratio, "shares_before": before})
                 last_factor[symbol] = factor
 
-            # 2) T+1 解锁
+            # 2) T+1 解锁（期货 T+0：release 后 available = shares，效果一致）
             portfolio.release_available()
+            opened_today = {}
+
+            # 2.5) 期货到期强平：到期日（含）之后强制离场
+            self._handle_futures_expiry(state, spec_map, contract_expiry, day, today_bars)
 
             if cfg.execution == "next_open":
                 # 3) 撮合昨日信号（开盘价）
-                self._execute_pending(state, simulator, day, today_bars, weight_cap)
+                self._execute_pending(state, simulator, day, today_bars, weight_cap, spec_map, opened_today)
                 # 4) 更新收盘价 + 盯市
                 self._update_closes(state, today_bars)
                 nav = portfolio.total_value(state.last_prices)
@@ -232,7 +246,7 @@ class BacktestEngine:
             else:  # same_close
                 self._update_closes(state, today_bars)
                 strategy.on_signal(ctx)
-                self._execute_pending(state, simulator, day, today_bars, weight_cap)
+                self._execute_pending(state, simulator, day, today_bars, weight_cap, spec_map, opened_today)
                 nav = portfolio.total_value(state.last_prices)
                 nav_rows.append(self._nav_row(day, nav, portfolio, state))
                 if halt is not None and halt.check(nav, day):
@@ -312,8 +326,11 @@ class BacktestEngine:
         day: pd.Timestamp,
         today_bars: dict[str, pd.Series],
         weight_cap: PositionWeightCap | None,
+        spec_map: dict | None = None,
+        opened_today: dict[str, float] | None = None,
     ) -> None:
         pending, state.pending = state.pending, []
+        opened_today = opened_today if opened_today is not None else {}
         for order in pending:
             bar = today_bars.get(order.symbol)
             if bar is None:
@@ -321,24 +338,48 @@ class BacktestEngine:
                     {"date": day, "symbol": order.symbol, "side": order.side, "qty": order.qty, "code": "SUSPENDED"}
                 )
                 continue
-            if order.side == "buy" and weight_cap is not None:
-                ref = float(bar["open" if simulator.mode == "next_open" else "close"])
-                total_value = state.portfolio.total_value(state.last_prices)
-                capped = weight_cap.cap_qty(order.symbol, order.qty, ref, total_value)
-                if capped < order.qty:
+            spec = (spec_map or {}).get(order.symbol)
+            if spec is not None:
+                expiry = contract_expiry(order.symbol)
+                if order.source == "strategy" and expiry is not None and day >= expiry:
                     state.rejections.append(
                         {
                             "date": day,
                             "symbol": order.symbol,
                             "side": order.side,
-                            "qty": order.qty - capped,
-                            "code": "WEIGHT_CAP",
+                            "qty": order.qty,
+                            "code": "EXPIRED",
                         }
                     )
-                    order = Order(order.symbol, order.side, capped, order.created_at, order.source)
-                    if order.qty <= 0:
-                        continue
-            result = simulator.simulate_fill(order, bar, state.portfolio)
+                    continue
+                result = simulator.simulate_futures_fill(
+                    order,
+                    bar,
+                    state.portfolio,
+                    spec,
+                    opened_today=opened_today.get(order.symbol, 0.0),
+                    margin_headroom=self._margin_headroom(state, spec_map or {}, order.symbol, bar, simulator),
+                )
+            else:
+                # 仓位权重上限仅约束股票（期货是保证金交易，权重无意义）
+                if order.side == "buy" and weight_cap is not None:
+                    ref = float(bar["open" if simulator.mode == "next_open" else "close"])
+                    total_value = state.portfolio.total_value(state.last_prices)
+                    capped = weight_cap.cap_qty(order.symbol, order.qty, ref, total_value)
+                    if capped < order.qty:
+                        state.rejections.append(
+                            {
+                                "date": day,
+                                "symbol": order.symbol,
+                                "side": order.side,
+                                "qty": order.qty - capped,
+                                "code": "WEIGHT_CAP",
+                            }
+                        )
+                        order = Order(order.symbol, order.side, capped, order.created_at, order.source)
+                        if order.qty <= 0:
+                            continue
+                result = simulator.simulate_fill(order, bar, state.portfolio)
             if result.rejected:
                 state.rejections.append(
                     {
@@ -350,7 +391,16 @@ class BacktestEngine:
                     }
                 )
                 continue
-            if order.side == "buy":
+
+            if spec is not None:
+                signed_delta = result.filled_qty if order.side == "buy" else -result.filled_qty
+                pnl = state.portfolio.apply_fill(order.symbol, signed_delta, result.price, result.fees)
+                pos = state.portfolio.position(order.symbol)  # 期货 T+0：可用手数即时同步
+                pos.available = pos.shares
+                opened_today[order.symbol] = max(
+                    opened_today.get(order.symbol, 0.0) + result.open_qty - result.close_today_qty, 0.0
+                )
+            elif order.side == "buy":
                 state.portfolio.buy(order.symbol, result.filled_qty, result.price, result.fees)
                 pnl = None
             else:
@@ -365,6 +415,82 @@ class BacktestEngine:
                     "price": result.price,
                     "value": result.value,
                     "fees": result.fees,
+                    "cash_after": state.portfolio.cash,
+                    "pnl": pnl,
+                }
+            )
+
+    def _margin_headroom(
+        self,
+        state: EngineState,
+        spec_map: dict,
+        symbol: str,
+        bar: pd.Series,
+        simulator: ExecutionSimulator,
+    ) -> float:
+        """可用保证金空间 = 权益 - 全组合保证金占用 + 本次平仓预计释放.
+
+        权益 = cash + Σ signed_shares × price × multiplier（现金流为带符号
+        全额价值口径，见 Portfolio.apply_fill）。
+        """
+        portfolio = state.portfolio
+        used = 0.0
+        for sym in portfolio.position_symbols:
+            spec = spec_map.get(sym)
+            if spec is None:
+                continue
+            pos = portfolio.position(sym)
+            price = state.last_prices.get(sym, pos.last_price)
+            used += abs(pos.shares) * price * spec.multiplier * spec.margin_rate
+        free = portfolio.total_value(state.last_prices) - used
+        spec = spec_map.get(symbol)
+        if spec is not None:
+            pos = portfolio.position(symbol)
+            ref = float(bar["open" if simulator.mode == "next_open" else "close"])
+            free += abs(pos.shares) * ref * spec.multiplier * spec.margin_rate  # 平仓释放
+        return free
+
+    def _handle_futures_expiry(
+        self,
+        state: EngineState,
+        spec_map: dict,
+        expiry_of,
+        day: pd.Timestamp,
+        today_bars: dict[str, pd.Series],
+    ) -> None:
+        """期货到期强平：到期日（含）起强制离场；无 bar 时按最近价直接了结."""
+        for symbol in list(state.portfolio.position_symbols):
+            spec = spec_map.get(symbol)
+            if spec is None:
+                continue
+            expiry = expiry_of(symbol)
+            if expiry is None or day < expiry:
+                continue
+            pos = state.portfolio.position(symbol)
+            signed_delta = -pos.shares  # 全部了结（多头卖出 / 空头买入回补）
+            bar = today_bars.get(symbol)
+            if bar is not None:
+                state.queue_order(
+                    Order(
+                        symbol=symbol,
+                        side="sell" if pos.shares > 0 else "buy",
+                        qty=abs(pos.shares),
+                        created_at=day,
+                        source="expiry",
+                    )
+                )
+                continue
+            # 停牌/数据缺失：按最近价直接了结（零费用近似）
+            pnl = state.portfolio.apply_fill(symbol, signed_delta, pos.last_price, 0.0)
+            self._trade_records.append(
+                {
+                    "date": day,
+                    "symbol": symbol,
+                    "side": "sell" if signed_delta > 0 else "buy",
+                    "qty": abs(signed_delta),
+                    "price": pos.last_price,
+                    "value": abs(signed_delta) * pos.last_price * spec.multiplier,
+                    "fees": 0.0,
                     "cash_after": state.portfolio.cash,
                     "pnl": pnl,
                 }

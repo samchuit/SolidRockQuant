@@ -52,6 +52,14 @@ def build_server() -> Any:
         return t.tool_get_data_overview()
 
     @mcp.tool()
+    def data_health(symbols: list[str] | None = None, jump_threshold: float = 0.2) -> str:
+        """数据体检：缺失交易日、OHLC 异常、复权因子缺失、单日大幅波动。
+
+        symbols 缺省检查全部本地标的。回测前建议跑一次，避免坏数据污染结论。
+        """
+        return t.tool_data_health(symbols=symbols, jump_threshold=jump_threshold)
+
+    @mcp.tool()
     def list_data_sources() -> str:
         """列出可用数据源（akshare/tushare 等）及其能力与可用性。"""
         return t.tool_list_data_sources()

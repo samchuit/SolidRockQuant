@@ -58,12 +58,22 @@ class TradeRecord:
 
 @dataclass
 class Portfolio:
-    """组合状态."""
+    """组合状态.
+
+    持仓为**带符号数量**：正 = 多头，负 = 空头（期货）。两条记账路径：
+    - ``buy``/``sell``：股票（全额资金、费用摊入成本、T+1 由 available 体现）；
+    - ``apply_fill``：期货（保证金约束在外层、平仓释放盈亏、支持翻转）。
+    ``multipliers`` 由引擎按合约规格注入（默认 1.0，股票不受影响）。
+    """
 
     initial_cash: float
     cash: float
     positions: dict[str, Position] = field(default_factory=dict)
     realized_pnl: float = 0.0
+    multipliers: dict[str, float] = field(default_factory=dict)
+
+    def multiplier(self, symbol: str) -> float:
+        return self.multipliers.get(symbol, 1.0)
 
     # ---------------------------------------------------------------- 查询
     def position(self, symbol: str) -> Position:
@@ -71,14 +81,14 @@ class Portfolio:
 
     @property
     def position_symbols(self) -> list[str]:
-        return [s for s, p in self.positions.items() if p.shares > 0]
+        return [s for s, p in self.positions.items() if abs(p.shares) > 1e-9]
 
     def market_value(self, prices: Mapping[str, float]) -> float:
         total = 0.0
         for symbol in self.position_symbols:
             pos = self.positions[symbol]
             price = prices.get(symbol, pos.last_price)
-            total += pos.shares * price
+            total += pos.shares * price * self.multiplier(symbol)
         return total
 
     def total_value(self, prices: Mapping[str, float]) -> float:
@@ -89,7 +99,7 @@ class Portfolio:
         if total <= 0:
             return {}
         return {
-            s: self.positions[s].shares * prices.get(s, self.positions[s].last_price) / total
+            s: self.positions[s].shares * prices.get(s, self.positions[s].last_price) * self.multiplier(s) / total
             for s in self.position_symbols
         }
 
@@ -141,6 +151,42 @@ class Portfolio:
             cash_after=self.cash,
             pnl=pnl,
         )
+
+    def apply_fill(self, symbol: str, qty_delta: float, price: float, cost: float) -> float:
+        """期货成交核算（带符号持仓，支持开/平/翻转）.
+
+        ``qty_delta``：正 = 买入手数，负 = 卖出手数（单位：手）。
+        现金流为**带符号全额价值**（开多付价值、开空收价值，平仓反向），
+        使 ``nav = cash + Σ signed_shares × price × multiplier`` 始终包含
+        持仓成本基准；保证金只是引擎侧的约束，不影响现金流。
+        翻转 = 先平旧仓再开新仓，费用由撮合层按开/平拆分算好一次性传入。
+
+        返回已实现盈亏（含费用）。``avg_cost`` 为开仓价。
+        """
+        if abs(qty_delta) < 1e-12:
+            return 0.0
+        m = self.multiplier(symbol)
+        pos = self.positions.setdefault(symbol, Position(symbol=symbol))
+        cur = pos.shares
+        closing = cur != 0 and (cur > 0) != (qty_delta > 0)
+        closed = min(abs(qty_delta), abs(cur)) if closing else 0.0
+        realized_gross = (
+            ((price - pos.avg_cost) if cur > 0 else (pos.avg_cost - price)) * closed * m if closed > 0 else 0.0
+        )
+        pnl = realized_gross - cost
+        self.cash -= qty_delta * price * m + cost
+
+        new_shares = cur + qty_delta
+        if abs(new_shares) < 1e-9:
+            self.positions.pop(symbol, None)
+            pos.shares, pos.available, pos.last_price = 0.0, 0.0, price
+        else:
+            if abs(qty_delta) - closed > 1e-9:  # 有新开部分 → 成本重置为成交价
+                pos.avg_cost = price
+            pos.shares = new_shares
+            pos.last_price = price
+        self.realized_pnl += pnl
+        return pnl
 
     def release_available(self) -> None:
         """每日开盘前调用：昨日买入的股份今日可卖（T+1 解锁）."""

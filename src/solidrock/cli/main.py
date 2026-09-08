@@ -231,6 +231,28 @@ def data_sources() -> None:
     console.print(table)
 
 
+@data_app.command("doctor")
+def data_doctor(
+    symbols: str | None = typer.Option(None, "--symbols", "-s", help="逗号分隔（缺省检查全部）"),
+    jump: float = typer.Option(0.2, "--jump-threshold", help="单日涨跌幅告警阈值"),
+) -> None:
+    """数据体检：缺失/逻辑错误/复权因子缺失/异常波动。"""
+    from solidrock.data.quality import check_store, render_health_markdown
+
+    try:
+        symbol_list = [s.strip().upper() for s in symbols.split(",")] if symbols else None
+        report = check_store(_store(), symbol_list, jump_threshold=jump)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    if report.ok:
+        console.print(f"[green]✓[/green] 体检通过：{report.checked} 个符号全部健康")
+        return
+    from rich.markdown import Markdown
+
+    console.print(Markdown(render_health_markdown(report)))
+
+
 snapshot_app = typer.Typer(help="数据版本快照（实验复现用）", no_args_is_help=True)
 data_app.add_typer(snapshot_app, name="snapshot")
 

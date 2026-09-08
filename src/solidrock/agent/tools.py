@@ -140,6 +140,15 @@ def _data_overview() -> dict:
     }
 
 
+def _data_health(symbols: list[str] | None = None, jump_threshold: float = 0.2) -> dict:
+    from solidrock.data.quality import check_store
+
+    report = check_store(_store(), symbols, jump_threshold=jump_threshold)
+    payload = report.to_dict()
+    payload["note"] = "大幅波动可能来自换月（主连）或真实行情；因子缺失会使前复权不可用"
+    return payload
+
+
 def _search_instruments(query: str, limit: int = 20, source: str | None = None) -> dict:
     store = _store()
     found = store.search_instruments(query, limit=limit)
@@ -367,6 +376,11 @@ def tool_get_data_overview() -> str:
     return _run_tool(_data_overview)
 
 
+def tool_data_health(symbols: list[str] | None = None, jump_threshold: float = 0.2) -> str:
+    """[工具] 数据体检：缺失交易日/OHLC 异常/复权因子缺失/大幅波动。"""
+    return _run_tool(_data_health, symbols=symbols, jump_threshold=jump_threshold)
+
+
 def tool_search_instruments(query: str, limit: int = 20, source: str | None = None) -> str:
     """[工具] 按代码或名称搜索标的（股票/指数/ETF）。"""
     return _run_tool(_search_instruments, query=query, limit=limit, source=source)
@@ -476,6 +490,7 @@ def tool_list_data_sources() -> str:
 
 ALL_TOOLS: dict[str, Any] = {
     "get_data_overview": tool_get_data_overview,
+    "data_health": tool_data_health,
     "list_data_sources": tool_list_data_sources,
     "search_instruments": tool_search_instruments,
     "fetch_bars": tool_fetch_bars,

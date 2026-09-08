@@ -31,8 +31,12 @@ class CostModel(ABC):
         return price * (1 + slip) if side == "buy" else price * (1 - slip)
 
     @abstractmethod
-    def fees(self, value: float, side: Side) -> float:
-        """给定成交金额（已含滑点）与方向，返回总费用。"""
+    def fees(self, value: float, side: Side, *, closing_today_value: float = 0.0) -> float:
+        """给定成交金额（已含滑点）与方向，返回总费用.
+
+        ``closing_today_value``：平仓金额中"当日开仓"部分（期货平今差别费率
+        用）；股票模型忽略。
+        """
 
     def describe(self) -> dict[str, float]:
         """模型参数摘要（实验记录用）。"""
@@ -64,7 +68,7 @@ class AShareCostModel(CostModel):
         self.transfer_fee_rate = s.transfer_fee_rate if transfer_fee_rate is None else transfer_fee_rate
         self.slippage_bps = s.slippage_bps if slippage_bps is None else slippage_bps
 
-    def fees(self, value: float, side: Side) -> float:
+    def fees(self, value: float, side: Side, *, closing_today_value: float = 0.0) -> float:
         if value <= 0:
             return 0.0
         commission = max(value * self.commission_rate, self.commission_min)
@@ -78,5 +82,56 @@ class AShareCostModel(CostModel):
             "commission_min": self.commission_min,
             "stamp_duty_rate": self.stamp_duty_rate,
             "transfer_fee_rate": self.transfer_fee_rate,
+            "slippage_bps": self.slippage_bps,
+        }
+
+
+class FuturesCostModel(CostModel):
+    """期货费用模型：开仓/平昨/平今三段费率（费率 × 合约价值）.
+
+    合约价值 = 价格 × 手数 × 合约乘数（引擎算好传入 ``value``）。
+    平仓时 ``closing_today_value`` 部分按平今费率、其余按平昨费率；
+    开仓一律按开仓费率。各品种费率差异大，请按合约规格覆盖。
+    """
+
+    def __init__(
+        self,
+        *,
+        open_fee_rate: float = 1e-4,
+        close_fee_rate: float = 1e-4,
+        close_today_fee_rate: float = 5e-4,
+        slippage_bps: float = 1.0,
+    ) -> None:
+        self.open_fee_rate = open_fee_rate
+        self.close_fee_rate = close_fee_rate
+        self.close_today_fee_rate = close_today_fee_rate
+        self.slippage_bps = slippage_bps
+
+    def fees(self, value: float, side: Side, *, closing_today_value: float = 0.0) -> float:
+        """单边近似计费（side=buy 视为开仓、sell 视为平仓）.
+
+        期货的开/平由持仓方向决定而非买卖方向，混合开平请用
+        :meth:`trade_fees`（撮合层期货路径使用）。
+        """
+        if value <= 0:
+            return 0.0
+        if side == "buy":
+            return value * self.open_fee_rate
+        today = min(max(closing_today_value, 0.0), value)
+        return value * self.close_fee_rate + today * (self.close_today_fee_rate - self.close_fee_rate)
+
+    def trade_fees(self, *, open_value: float = 0.0, close_value: float = 0.0, close_today_value: float = 0.0) -> float:
+        """精确计费：按开仓/平昨/平今三段金额分别计价（撮合层期货路径调用）."""
+        close_ordinary = max(close_value - max(close_today_value, 0.0), 0.0)
+        today = min(max(close_today_value, 0.0), close_value)
+        return (
+            open_value * self.open_fee_rate + close_ordinary * self.close_fee_rate + today * self.close_today_fee_rate
+        )
+
+    def describe(self) -> dict[str, float]:
+        return {
+            "open_fee_rate": self.open_fee_rate,
+            "close_fee_rate": self.close_fee_rate,
+            "close_today_fee_rate": self.close_today_fee_rate,
             "slippage_bps": self.slippage_bps,
         }

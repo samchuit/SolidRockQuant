@@ -1,4 +1,4 @@
-"""撮合模拟：涨跌停、T+1、整手、资金约束.
+"""撮合模拟：涨跌停、T+1、整手、资金约束；期货：保证金、双向持仓、平今费率.
 
 执行模式（引擎配置 ``execution``）：
 - ``next_open``（默认，防前视）：T 日收盘出信号 → T+1 开盘价成交；
@@ -13,6 +13,15 @@ A股规则（每日 bar 的简化，均为业界标准做法）：
 - 整手：买入向下取整到 100 股；卖出允许零股（清仓场景）；
 - 资金不足：买单向下调整到可负担的最大整手数量，调整后为 0 则拒单；
 - 停牌：当日无 bar → 订单过期（订单仅对下一根 bar 有效）。
+
+期货规则（:meth:`ExecutionSimulator.simulate_futures_fill`）：
+- 涨跌停按合约规格（:class:`~solidrock.data.futures.ContractSpec`）；
+- 手数即整数手（lot=1），无 T+1；
+- 双向持仓：买卖按当前净持仓方向自动解析为开仓/平仓/翻转，翻转拆为
+  "先平后开"一次成交；
+- 保证金约束：新开部分占用保证金 ≤ 可用资金（引擎传入 headroom），
+  超出则下调开仓手数；纯平仓不占新保证金；
+- 平今拆分费率：平仓量中当日开仓部分按平今费率（trade_fees 精确计费）。
 """
 
 from __future__ import annotations
@@ -23,7 +32,9 @@ from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
-from solidrock.backtest.costs import CostModel
+from solidrock.agent.errors import ErrorCode, err
+from solidrock.backtest.costs import CostModel, FuturesCostModel
+from solidrock.data.futures import ContractSpec
 from solidrock.data.symbols import parse_symbol
 
 if TYPE_CHECKING:
@@ -53,6 +64,10 @@ class ExecutionResult:
     value: float = 0.0
     fees: float = 0.0
     rejected: str | None = None  # None=成交；否则为拒单码
+    # 开/平拆分（期货记账用；股票路径 buy=开、sell=平）
+    open_qty: float = 0.0
+    close_qty: float = 0.0
+    close_today_qty: float = 0.0
 
 
 def board_limit_ratio(symbol: str, overrides: dict[str, float] | None = None) -> float:
@@ -76,7 +91,7 @@ def round_half_up(value: float, digits: int = 2) -> float:
 
 
 class ExecutionSimulator:
-    """撮合器：把订单意图变成成交或拒单."""
+    """撮合器：把订单意图变成成交或拒单（股票 + 期货两条路径）。"""
 
     def __init__(
         self,
@@ -85,11 +100,13 @@ class ExecutionSimulator:
         mode: ExecutionMode = "next_open",
         limit_ratio_overrides: dict[str, float] | None = None,
         round_lot: bool = True,
+        futures_cost_model: FuturesCostModel | None = None,
     ) -> None:
         self.cost_model = cost_model
         self.mode: ExecutionMode = mode
         self.limit_ratio_overrides = limit_ratio_overrides or {}
         self.round_lot = round_lot
+        self.futures_cost_model = futures_cost_model
 
     # ------------------------------------------------------------------ 价格
     def limit_prices(self, symbol: str, pre_close: float) -> tuple[float, float]:
@@ -103,9 +120,13 @@ class ExecutionSimulator:
     def _ref_price(self, bar: pd.Series) -> float:
         return float(bar["open" if self.mode == "next_open" else "close"])
 
+    @staticmethod
+    def _limits_from_ratio(pre_close: float, ratio: float) -> tuple[float, float]:
+        return round_half_up(pre_close * (1 + ratio)), round_half_up(pre_close * (1 - ratio))
+
     # ------------------------------------------------------------------ 撮合
     def simulate_fill(self, order: Order, bar: pd.Series, portfolio: Portfolio) -> ExecutionResult:
-        """对单根 bar 撮合一笔订单.
+        """股票路径：对单根 bar 撮合一笔订单.
 
         ``bar`` 为执行日该标的的标准 bar（含 pre_close/open/close）；
         停牌（无 bar）由引擎处理，不会进入这里。
@@ -145,7 +166,101 @@ class ExecutionSimulator:
         price = self.cost_model.slipped_price(ref, side)
         value = qty * price
         fees = self.cost_model.fees(value, side)
-        return ExecutionResult(order=order, filled_qty=qty, price=price, value=value, fees=fees)
+        return ExecutionResult(
+            order=order,
+            filled_qty=qty,
+            price=price,
+            value=value,
+            fees=fees,
+            open_qty=qty if side == "buy" else 0.0,
+            close_qty=qty if side == "sell" else 0.0,
+        )
+
+    def simulate_futures_fill(
+        self,
+        order: Order,
+        bar: pd.Series,
+        portfolio: Portfolio,
+        spec: ContractSpec,
+        *,
+        opened_today: float = 0.0,
+        margin_headroom: float | None = None,
+    ) -> ExecutionResult:
+        """期货路径：保证金约束、无 T+1、整数手、平今拆分费率.
+
+        ``opened_today``：该符号当日已开仓手数（平今费率拆分依据）；
+        ``margin_headroom``：可用保证金空间 = 现金 - 当前占用保证金
+        + 本次平仓预计释放（引擎计算传入）；None 时跳过保证金约束。
+        """
+        fcm = self.futures_cost_model
+        if fcm is None:
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                "期货撮合需要配置 futures_cost_model",
+                hint="BacktestConfig(futures_cost_model=FuturesCostModel(...))",
+            )
+        pre_close = float(bar["pre_close"])
+        if pd.isna(pre_close):
+            pre_close = float(bar["close"])
+        limit_up, limit_down = self._limits_from_ratio(pre_close, spec.limit_ratio)
+        ref = self._ref_price(bar)
+        side = order.side
+
+        eps = 1e-6
+        if side == "buy" and ref >= limit_up - eps:
+            return ExecutionResult(order=order, rejected="LIMIT_UP")
+        if side == "sell" and ref <= limit_down + eps:
+            return ExecutionResult(order=order, rejected="LIMIT_DOWN")
+
+        qty = math.floor(order.qty)  # 期货以整数手交易
+        if qty <= 0:
+            return ExecutionResult(order=order, rejected="LOT_TOO_SMALL")
+
+        cur = portfolio.position(order.symbol).shares
+        signed_delta = qty if side == "buy" else -qty
+        closing = cur != 0 and (cur > 0) != (signed_delta > 0)
+        close_qty = min(qty, abs(cur)) if closing else 0.0
+        open_qty = qty - close_qty
+        close_today = min(close_qty, max(opened_today, 0.0))
+
+        mult = spec.multiplier
+
+        def fees_for(open_lots: float) -> float:
+            p = fcm.slipped_price(ref, side)
+            return fcm.trade_fees(
+                open_value=open_lots * p * mult,
+                close_value=close_qty * p * mult,
+                close_today_value=close_today * p * mult,
+            )
+
+        # 保证金约束：仅约束新开部分（平仓释放保证金、不占新保证金）
+        if open_qty > 0 and margin_headroom is not None:
+            while (
+                open_qty > 0 and open_qty * ref * mult * spec.margin_rate + fees_for(open_qty) > margin_headroom + 1e-6
+            ):
+                open_qty -= 1
+            if open_qty <= 0:
+                if close_qty > 0:
+                    open_qty = 0  # 只平不开
+                else:
+                    return ExecutionResult(order=order, rejected="INSUFFICIENT_MARGIN")
+
+        final_qty = open_qty + close_qty
+        if final_qty <= 0:
+            return ExecutionResult(order=order, rejected="INSUFFICIENT_MARGIN")
+        price = fcm.slipped_price(ref, side)
+        value = final_qty * price * mult
+        fees = fees_for(open_qty)
+        return ExecutionResult(
+            order=order,
+            filled_qty=final_qty,
+            price=price,
+            value=value,
+            fees=fees,
+            open_qty=open_qty,
+            close_qty=close_qty,
+            close_today_qty=close_today if close_qty > 0 else 0.0,
+        )
 
     # ------------------------------------------------------------------ 资金
     def _cap_by_cash(self, qty: float, ref_price: float, portfolio: Portfolio) -> float:
