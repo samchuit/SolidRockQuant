@@ -843,6 +843,71 @@ def tool_live_reconcile(paper_name: str | None = None, target: dict[str, int] | 
     return _run_tool(_live_reconcile, paper_name=paper_name, target=target)
 
 
+def _run_ml_walk_forward(
+    factor_names: list[str],
+    universe: list[str],
+    start: str,
+    end: str,
+    horizon: int = 5,
+    train_window: int = 252,
+    test_window: int = 21,
+    step: int = 21,
+) -> dict[str, Any]:
+    """委托给 walk_forward_ml 管道（详见 solidrock.ml.pipeline）."""
+    from solidrock.data.symbols import validate_symbols
+    from solidrock.factors.base import create_factor
+    from solidrock.ml.pipeline import walk_forward_ml
+
+    universe_list = [s.value for s in validate_symbols(universe)]
+    factors = {fname: create_factor(fname) for fname in factor_names}
+    result = walk_forward_ml(
+        factors,
+        _store(),
+        universe_list,
+        start=start,
+        end=end,
+        horizon=horizon,
+        train_window=train_window,
+        test_window=test_window,
+        step=step,
+        log_experiment=True,
+    )
+    return {
+        "run_id": result.run_id,
+        "factor_names": result.factor_names,
+        "ic_summary": result.ic_summary,
+        "feature_importance": result.feature_importance,
+        "window_stats": result.window_stats,
+        "data_snapshot": result.data_snapshot,
+        "artifacts_dir": str(result.artifacts_dir) if result.artifacts_dir else None,
+        "note": "walk-forward ML 结果，过拟合检测见 window_stats 的 train_ic vs test_ic",
+    }
+
+
+def tool_run_ml_walk_forward(
+    factor_names: list[str],
+    universe: list[str],
+    start: str,
+    end: str,
+    horizon: int = 5,
+    train_window: int = 252,
+    test_window: int = 21,
+    step: int = 21,
+) -> str:
+    """[工具] Walk-forward ML 管道：滚动训练/预测 + 预测 IC + 向量化回测."""
+    return _run_tool(
+        _run_ml_walk_forward,
+        factor_names=factor_names,
+        universe=universe,
+        start=start,
+        end=end,
+        horizon=horizon,
+        train_window=train_window,
+        test_window=test_window,
+        step=step,
+    )
+
+
 def tool_list_data_sources() -> str:
     """[工具] 列出可用数据源及其能力。"""
 
@@ -866,6 +931,7 @@ ALL_TOOLS: dict[str, Any] = {
     "compare_experiments": tool_compare_experiments,
     "run_factor_analysis": tool_run_factor_analysis,
     "run_vectorized_backtest": tool_run_vectorized_backtest,
+    "run_ml_walk_forward": tool_run_ml_walk_forward,
     "run_backtest_sandboxed": tool_run_backtest_sandboxed,
     "run_paper_session": tool_run_paper_session,
     "paper_status": tool_paper_status,

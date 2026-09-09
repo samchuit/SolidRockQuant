@@ -323,6 +323,34 @@ def build_server() -> Any:
         """
         return t.tool_live_reconcile(paper_name=paper_name, target=target)
 
+    @mcp.tool()
+    def run_ml_walk_forward(
+        factor_names: list[str],
+        universe: list[str],
+        start: str,
+        end: str,
+        horizon: int = 5,
+        train_window: int = 252,
+        test_window: int = 21,
+        step: int = 21,
+    ) -> str:
+        """Walk-forward ML 管道：滚动训练/预测 + 预测 IC + 向量化回测.
+
+        factor_names 为已注册因子名列表（通过 register_factor 注册的插件因子，
+        或内置因子）。universe 为股票池符号列表。返回预测 IC、特征重要性、
+        向量化回测指标。过拟合检测：比较各窗口的 train_ic vs test_ic。
+        """
+        return t.tool_run_ml_walk_forward(
+            factor_names=factor_names,
+            universe=universe,
+            start=start,
+            end=end,
+            horizon=horizon,
+            train_window=train_window,
+            test_window=test_window,
+            step=step,
+        )
+
     return mcp
 
 

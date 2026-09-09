@@ -743,6 +743,68 @@ def live_reconcile(
             raise typer.Exit(1) from e
 
 
+# ----------------------------------------------------------------- ml
+ml_app = typer.Typer(help="ML 量化管道", no_args_is_help=True)
+app.add_typer(ml_app, name="ml")
+
+
+@ml_app.command("walk-forward")
+def ml_walk_forward(
+    factor_names: str = typer.Option(..., "--factors", "-f", help="逗号分隔的已注册因子名"),
+    universe: str = typer.Option(..., "-u", help="逗号分隔的股票池符号"),
+    start: str = typer.Option(..., "--start"),
+    end: str = typer.Option(..., "--end"),
+    horizon: int = typer.Option(5, "--horizon", help="前瞻收益期（交易日）"),
+    train_window: int = typer.Option(252, "--train-window", help="训练窗口（交易日）"),
+    test_window: int = typer.Option(21, "--test-window", help="预测窗口（交易日）"),
+    step: int = typer.Option(21, "--step", help="滚动步长"),
+    n_estimators: int = typer.Option(200, "--n-estimators", help="树数量"),
+    learning_rate: float = typer.Option(0.05, "--lr", help="学习率"),
+    name: str | None = typer.Option(None, "--name"),
+) -> None:
+    """Walk-forward ML 管道：滚动训练/预测 + 预测 IC + 向量化回测."""
+    from solidrock.backtest.paper import PaperTrader  # noqa: F401
+    from solidrock.factors import create_factor
+    from solidrock.ml.pipeline import walk_forward_ml
+
+    universe_list = [s.strip().upper() for s in universe.split(",") if s.strip()]
+    fnames = [f.strip() for f in factor_names.split(",") if f.strip()]
+    try:
+        validate_symbols(universe_list)
+        factors = {f: create_factor(f) for f in fnames}
+        store = _store()
+        # 数据加载和 walk-forward 由 walk_forward_ml 完成
+        result = walk_forward_ml(
+            factors,
+            store,
+            universe_list,
+            start=start,
+            end=end,
+            horizon=horizon,
+            train_window=train_window,
+            test_window=test_window,
+            step=step,
+            model_params={"n_estimators": n_estimators, "learning_rate": learning_rate},
+            log_experiment=False,
+            name=name,
+        )
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+
+    ic = result.ic_summary
+    table = Table(title="Walk-forward ML 结果")
+    table.add_column("指标", style="cyan")
+    table.add_column("数值", justify="right")
+    table.add_row("IC 均值", f"{ic['ic_mean']:.4f}")
+    table.add_row("ICIR", f"{ic['ic_ir']:.3f}")
+    table.add_row("IC t 值", f"{ic['ic_t_stat']:.2f}")
+    table.add_row("IC>0 占比", f"{ic['positive_ratio'] * 100:.1f}%")
+    for k, v in result.feature_importance.items():
+        table.add_row(f"重要性 {k}", f"{v * 100:.1f}%")
+    console.print(table)
+
+
 # ----------------------------------------------------------------- experiment
 @experiment_app.command("list")
 def experiment_list(

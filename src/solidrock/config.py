@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     live_account_type: str = "STOCK"  # STOCK / CREDIT / FUTURE 等
     live_read_only: bool = True  # 只读模式：True 时禁止下单/撤单（安全默认，实盘下单显式关闭）
 
+    # --- 通知 ---
+    notify_webhook: str | None = None  # SOLIDROCK_NOTIFY_WEBHOOK（钉钉/企微/通用）
+    notify_type: str = "generic"  # dingtalk / wecom / generic
+    notify_secret: str | None = None  # 钉钉加签 secret
+
     # --- 交易费用默认值（M3 回测使用） ---
     commission_rate: float = 2.5e-4  # 佣金 万2.5
     commission_min: float = 5.0  # 单笔最低佣金（元）
