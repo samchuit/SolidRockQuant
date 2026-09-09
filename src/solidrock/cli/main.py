@@ -130,11 +130,18 @@ def data_update(
 
 
 def _incremental_start(store: DataStore, symbol_list: list[str], *, freq: str = "1d") -> str:
-    """增量起点：全部符号都有本地数据时，从最早的最后日期次日续拉；否则全量。"""
+    """增量起点：全部符号都有本地数据时，从最早的最后日期续拉；否则全量.
+
+    日线：取最后日期次日（当日数据不会新增）；
+    分钟线：取最后日期当日零点起重拉（同日晚些时候还会有新 bar，
+    update_bars 按 (symbol, date) 去重保证幂等）。
+    """
     last_dates = [store.last_date(s, freq=freq) for s in symbol_list]
     if all(d is not None for d in last_dates):
         earliest = min(d for d in last_dates if d is not None)
-        return (earliest + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        if freq == "1d":
+            return (earliest + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        return earliest.strftime("%Y-%m-%d")
     return "1990-01-01"
 
 
@@ -165,11 +172,12 @@ def data_calendar(
 def data_peek(
     symbol: str = typer.Argument(..., help="统一符号，如 000001.SZ"),
     rows: int = typer.Option(3, "--rows", "-n", help="首尾各显示行数"),
+    freq: str = typer.Option("1d", "--freq", help="频率：1d / 1m / 5m"),
 ) -> None:
     """查看已缓存数据的首尾样本与覆盖区间。"""
     try:
         store = _store()
-        df = store.load_bars(symbol)
+        df = store.load_bars(symbol, freq=freq)
         if df.empty:
             raise SolidRockError(
                 ErrorCode.NO_DATA,

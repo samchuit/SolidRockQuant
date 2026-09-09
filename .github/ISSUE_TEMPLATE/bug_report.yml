@@ -1,0 +1,52 @@
+name: Bug 报告
+description: 报告 SolidRockQuant 的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请填写以下信息。**错误信封中的 `code` 与 `hint` 字段请原样保留**。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: python -c "import solidrock; print(solidrock.__version__)"
+      placeholder: 例如 0.2.1
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: 涉及模块
+      options:
+        - 数据层（fetch_bars / 存储 / 快照）
+        - 回测引擎
+        - 模拟盘
+        - 因子分析 / 向量化
+        - MCP Server / 工具
+        - CLI
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现步骤/代码
+      placeholder: |
+        1. srq data update --symbols ...
+        2. srq backtest run ...
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: 完整报错（含错误码与 hint）
+      placeholder: |
+        [NO_DATA] ...
+        hint: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为

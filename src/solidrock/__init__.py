@@ -22,6 +22,8 @@
     print(result.metrics["sharpe"])
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.backtest import BacktestConfig, BacktestEngine, BacktestResult, Context
 from solidrock.config import Settings, get_settings
@@ -30,7 +32,10 @@ from solidrock.data.symbols import AssetType, Symbol, parse_symbol
 from solidrock.factors import Factor, FactorData, analyze_factor
 from solidrock.strategy.base import Strategy
 
-__version__ = "0.2.0"
+try:  # 版本号以 pyproject.toml / 包元数据为单一来源
+    __version__ = version("solidrock-quant")
+except PackageNotFoundError:  # 源码直接运行（未安装）
+    __version__ = "0.0.0+source"
 
 __all__ = [
     "AssetType",

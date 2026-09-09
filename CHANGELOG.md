@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+（v0.4 开发中：插件机制、英语文档）
+
+## [0.2.1] - 2026-09-09
+
+### 新增
+
+- 社区基础设施：CONTRIBUTING.md、Bug/功能 Issue 模板、PR 模板
+- `srq data peek --freq`：查看分钟线样本
+- 包标记 PEP 561 `py.typed`（下游 mypy 可用类型提示）；`__version__` 改为
+  从包元数据单一来源读取
+
+### 修复
+
+- 分钟频率（1m/5m）增量更新起点错误地跳到次日，导致当日后段 bar 拉不到；
+  现从最后 bar 所在日零点起重拉（按 (symbol, date) 去重保证幂等）
+
+## [0.2.0] - 2026-09-08
+
 ### 新增（v0.3）
 
 - **策略沙箱**：子进程隔离执行回测，超时击杀（`TIMEOUT` 错误码），策略 `sys.exit`/死循环不影响宿主；MCP `run_backtest_sandboxed`
