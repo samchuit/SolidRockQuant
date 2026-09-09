@@ -25,8 +25,13 @@ def register_source(cls: T) -> T:
 
 
 def create_source(name: str, **kwargs: Any) -> DataSource:
-    """按名称实例化数据源。"""
+    """按名称实例化数据源（内置插件 + entry-points 第三方插件）。"""
     cls = _REGISTRY.get(name)
+    if cls is None:
+        from solidrock.plugins import require_discovered
+
+        require_discovered("sources")  # 首次未命中：扫描第三方插件后重试
+        cls = _REGISTRY.get(name)
     if cls is None:
         raise err(
             ErrorCode.SOURCE_NOT_REGISTERED,

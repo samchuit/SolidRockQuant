@@ -115,6 +115,46 @@ class Factor:
         return type(self).__name__
 
 
+# ---------------------------------------------------------------- 因子注册表
+_FACTOR_REGISTRY: dict[str, type[Factor]] = {}
+
+
+def register_factor(cls: type[Factor]) -> type[Factor]:
+    """类装饰器：把 Factor 子类注册到因子库（插件接入点之一）.
+
+    注册名取 ``cls.__name__``；重名注册直接报错（避免静默覆盖）。
+    """
+    name = cls.__name__
+    existing = _FACTOR_REGISTRY.get(name)
+    if existing is not None and existing is not cls:
+        raise ValueError(f"因子名 {name!r} 已被 {existing.__module__}.{existing.__qualname__} 注册")
+    _FACTOR_REGISTRY[name] = cls
+    return cls
+
+
+def create_factor(name: str, **params: Any) -> Factor:
+    """按注册名实例化因子（内置 + entry-points 第三方插件）。"""
+    cls = _FACTOR_REGISTRY.get(name)
+    if cls is None:
+        from solidrock.plugins import require_discovered
+
+        require_discovered("factors")  # 首次未命中：扫描第三方插件后重试
+        cls = _FACTOR_REGISTRY.get(name)
+    if cls is None:
+        raise err(
+            ErrorCode.SOURCE_NOT_REGISTERED,
+            f"未注册的因子 {name!r}",
+            hint=f"已注册因子：{sorted(_FACTOR_REGISTRY)}；"
+            "第三方因子可通过 entry-points 组 solidrock.factors 接入",
+        )
+    return cls(**params)
+
+
+def list_registered_factors() -> list[str]:
+    """全部已注册因子名（排序）。"""
+    return sorted(_FACTOR_REGISTRY)
+
+
 def load_factor_class(path: str | Path) -> type[Factor]:
     """加载因子文件中的 Factor 子类（文件内应只定义一个）。"""
     return load_class_from_file(path, Factor, "因子")

@@ -1,5 +1,7 @@
 # SolidRockQuant · 磐石智擎
 
+[简体中文](README.md) | [English](README.en.md)
+
 > **Agent 原生的量化研究与回测框架** —— 让 AI Agent 像研究员一样工作，让人类像审稿人一样把关。
 >
 > The agent-native quant research & backtest framework for China A-shares & futures.
@@ -129,6 +131,7 @@ src/solidrock/
 | [docs/design.md](docs/design.md) | 技术设计：架构、数据规范、引擎与 MCP 设计、关键取舍 |
 | [docs/roadmap.md](docs/roadmap.md) | 路线图与任务拆解 |
 | [docs/mcp-setup.md](docs/mcp-setup.md) | Claude Code / Claude Desktop 接入配置 |
+| [docs/plugins.md](docs/plugins.md) | 数据源/因子插件开发指南 |
 | [docs/release.md](docs/release.md) | 版本发布流程 |
 | [llms.txt](llms.txt) | 面向 LLM 的项目速览 |
 
