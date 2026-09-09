@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "solidrock-quant"
-version = "0.4.0"
+version = "0.5.0"
 description = "SolidRockQuant · 磐石智擎 — Agent 原生的量化研究与回测框架"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,10 +43,18 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "mypy>=1.10",
+    "mkdocs-material>=9.5",
+    "solidrock-yfinance",
 ]
 
 [project.scripts]
 srq = "solidrock.cli.main:main"
+
+[tool.uv.workspace]
+members = ["plugins/*"]
+
+[tool.uv.sources]
+solidrock-yfinance = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/solidrock"]

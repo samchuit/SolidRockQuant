@@ -5,7 +5,18 @@
 
 ## [Unreleased]
 
-（下一站：期货 CTP 实盘需券商环境，暂缓；其余 v0.3/v0.4 内容已随 0.4.0 发布）
+（下一站：期货 CTP 实盘需券商环境，暂缓）
+
+## [0.5.0] - 2026-09-09
+
+### 新增
+
+- **分钟线回测**：`BacktestConfig(freq="1m"/"5m")`——引擎日内时钟（bar 时间戳并集）、
+  换日解锁 T+1 与平今计数、指标按日重采样保证年化口径；期货+分钟组合明确拒绝
+- **海外标的符号体系**：`AAPL.NASDAQ` / `7203.TSE` 等格式（NYSE/NASDAQ/AMEX/HKEX/TSE/LSE），
+  `infer_asset_type` 归类为股票
+- **官方 yfinance 插件**：plugins/solidrock-yfinance（entry-points 接入的参考实现，
+  原始价+后复权因子双取数推导），uv workspace 管理
 
 ## [0.4.0] - 2026-09-09
 
@@ -17,7 +28,7 @@
   MCP `run_paper_session/paper_status`
 - **策略沙箱**：子进程隔离执行回测，超时击杀（`TIMEOUT` 错误码），策略 `sys.exit`/
   死循环不影响宿主；MCP `run_backtest_sandboxed`
-- **Agent 研究闭环示例**：examples/agent-workflow.md（筛选→显著性→回测→对比→模拟盘）
+- **Agent 研究闭环示例**：docs/agent-workflow.md（筛选→显著性→回测→对比→模拟盘）
 - **插件机制**：第三方包通过 entry-points 接入数据源（组 `solidrock.sources`）
   与因子（组 `solidrock.factors`）；发现惰性触发、单个插件加载失败不拖垮框架；
   因子注册表（`register_factor`/`create_factor`/`list_registered_factors`）；

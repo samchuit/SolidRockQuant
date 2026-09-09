@@ -22,9 +22,11 @@ from solidrock.agent.errors import ErrorCode, err
 
 STOCK_EXCHANGES = frozenset({"SH", "SZ", "BJ"})
 FUTURES_EXCHANGES = frozenset({"SHFE", "DCE", "CZCE", "CFE", "INE", "GFEX"})
-ALL_EXCHANGES = STOCK_EXCHANGES | FUTURES_EXCHANGES
+# 海外交易所（供数据源插件使用，如 yfinance；事件回测规则暂只覆盖 A股/期货）
+OVERSEAS_EXCHANGES = frozenset({"NYSE", "NASDAQ", "AMEX", "HKEX", "TSE", "LSE"})
+ALL_EXCHANGES = STOCK_EXCHANGES | FUTURES_EXCHANGES | OVERSEAS_EXCHANGES
 
-VALID_SYMBOL_EXAMPLES = "000001.SZ / 600519.SH / 000300.SH / 510300.SH / RB2505.SHFE / RB.SHFE"
+VALID_SYMBOL_EXAMPLES = "000001.SZ / 600519.SH / 000300.SH / 510300.SH / RB2505.SHFE / RB.SHFE / AAPL.NASDAQ"
 
 
 class AssetType(str, Enum):
@@ -82,6 +84,8 @@ def infer_asset_type(code: str, exchange: str) -> AssetType | None:
         return AssetType.STOCK
     if exchange == "BJ":
         return AssetType.INDEX if code[:3] == "899" else AssetType.STOCK
+    if exchange in OVERSEAS_EXCHANGES:
+        return AssetType.STOCK  # 海外现货统一按股票处理（数据源插件负责具体语义）
     return None
 
 
@@ -95,6 +99,15 @@ def _validate_code(code: str, exchange: str) -> str:
                 ErrorCode.SYMBOL_INVALID,
                 f"期货代码 {code!r} 格式非法",
                 hint=f"期货合约形如 RB2505.SHFE / TA505.CZCE，主连形如 RB.SHFE。合法示例：{VALID_SYMBOL_EXAMPLES}",
+            )
+        return code
+    if exchange in OVERSEAS_EXCHANGES:
+        # 海外：字母数字混合 1~6 位（AAPL / 7203 / BRK.B 不支持含点二级后缀）
+        if re.fullmatch(r"[A-Z0-9]{1,6}", code) is None:
+            raise err(
+                ErrorCode.SYMBOL_INVALID,
+                f"海外标的代码 {code!r} 格式非法",
+                hint=f"海外符号形如 AAPL.NASDAQ / 7203.TSE（1~6 位字母数字）。合法示例：{VALID_SYMBOL_EXAMPLES}",
             )
         return code
     # 股票/指数/ETF：6 位数字

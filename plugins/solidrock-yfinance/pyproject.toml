@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "solidrock-yfinance"
+version = "0.1.0"
+description = "SolidRockQuant 官方 yfinance 数据源插件（海外股票日线）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "solidrock-quant>=0.4.0",
+    "yfinance>=0.2.40",
+]
+
+[project.entry-points."solidrock.sources"]
+yfinance = "solidrock_yfinance.source"
+
+[tool.uv.sources]
+solidrock-quant = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/solidrock_yfinance"]

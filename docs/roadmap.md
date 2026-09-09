@@ -69,7 +69,7 @@
 - [ ] 期货实盘：CTP / openctp 网关（需要券商账户与 CTP 环境联调，暂缓）
 - 股票自动交易：先做只读对账（持仓核对），下单接口涉及券商合规，单独评估后决定
 - [x] **策略沙箱**：子进程隔离执行 + 超时击杀（策略 sys.exit/死循环不影响宿主）；MCP `run_backtest_sandboxed`
-- [x] **Agent 研究闭环示例**：examples/agent-workflow.md（筛选→显著性→回测→对比→模拟盘的完整 playbook）
+- [x] **Agent 研究闭环示例**：docs/agent-workflow.md（筛选→显著性→回测→对比→模拟盘的完整 playbook）
 
 ## v0.4 —— 生态
 

@@ -1,0 +1,47 @@
+site_name: SolidRockQuant · 磐石智擎
+site_description: Agent 原生的量化研究与回测框架（A股/期货）
+site_url: https://samchuit.github.io/SolidRockQuant/
+repo_url: https://github.com/samchuit/SolidRockQuant
+repo_name: samchuit/SolidRockQuant
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: slate
+      toggle:
+        icon: material/weather-night
+        name: 暗色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: slate
+      toggle:
+        icon: material/weather-sunny
+        name: 亮色模式
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - 首页: index.md
+  - 设计: design.md
+  - 路线图: roadmap.md
+  - 指南:
+      - MCP 接入: mcp-setup.md
+      - 插件开发: plugins.md
+      - Agent 研究闭环: agent-workflow.md
+      - 实战教程: tutorial-agent-research.md
+  - 发布: release.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - tables
+  - toc:
+      permalink: true

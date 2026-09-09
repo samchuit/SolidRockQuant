@@ -137,36 +137,58 @@ class BacktestEngine:
         strategy = self._strategy if isinstance(self._strategy, Strategy) else self._strategy()
         if cfg.cost_model is None:
             cfg.cost_model = AShareCostModel()
+        if cfg.freq not in ("1d", "1m", "5m"):
+            raise err(ErrorCode.PARAM_INVALID, f"freq 仅支持 1d/1m/5m，收到 {cfg.freq!r}")
+        if cfg.freq != "1d" and cfg.execution != "next_open":
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                "分钟回测仅支持 next_open 执行模式",
+                hint="分钟粒度下 same_close 的前视风险无法通过报告标注弥补",
+            )
         self._trade_records: list[dict] = []
-
-        # --- 日历与日期切分（含 warmup） ---
-        cal = TradingCalendar(self.store)
-        all_days = cal.days()
-        start_ts, end_ts = pd.Timestamp(cfg.start).normalize(), pd.Timestamp(cfg.end).normalize()
+        start_ts = pd.Timestamp(cfg.start).normalize()
+        # 分钟频率下 end 需包含当日全部日内 bar（归一到零点会把最后一天排除）
+        if cfg.freq == "1d":
+            end_ts = pd.Timestamp(cfg.end).normalize()
+        else:
+            end_ts = pd.Timestamp(cfg.end).normalize() + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         if start_ts > end_ts:
             raise err(ErrorCode.PARAM_INVALID, f"回测区间倒置：{start_ts.date()} > {end_ts.date()}")
-        mask = (all_days >= start_ts) & (all_days <= end_ts)
-        day_index = all_days[mask]
-        if len(day_index) == 0:
-            raise err(
-                ErrorCode.NO_DATA,
-                f"回测区间 {start_ts.date()}~{end_ts.date()} 内没有交易日",
-                hint="检查区间或先更新交易日历（srq data calendar --update）",
-            )
-        first_pos = int(all_days.searchsorted(day_index[0]))
-        warmup_start = all_days[max(0, first_pos - cfg.warmup_bars)]
-        loaded_days = all_days[all_days >= warmup_start]
-        loaded_days = loaded_days[loaded_days <= end_ts]
+
+        if cfg.freq == "1d":
+            # --- 日频：交易日历切分（含 warmup） ---
+            cal = TradingCalendar(self.store)
+            all_days = cal.days()
+            mask = (all_days >= start_ts) & (all_days <= end_ts)
+            day_index = all_days[mask]
+            if len(day_index) == 0:
+                raise err(
+                    ErrorCode.NO_DATA,
+                    f"回测区间 {start_ts.date()}~{end_ts.date()} 内没有交易日",
+                    hint="检查区间或先更新交易日历（srq data calendar --update）",
+                )
+            first_pos = int(all_days.searchsorted(day_index[0]))
+            warmup_start = all_days[max(0, first_pos - cfg.warmup_bars)]
+            loaded_days = all_days[all_days >= warmup_start]
+            loaded_days = loaded_days[loaded_days <= end_ts]
+            backtest_ticks = [d for d in loaded_days if d >= day_index[0]]
+            load_start = warmup_start
+        else:
+            # --- 分钟：时钟来自数据本身的 bar 时间戳；warmup 按日历天回看 ---
+            interval_min = 1 if cfg.freq == "1m" else 5
+            load_start = start_ts - pd.Timedelta(minutes=cfg.warmup_bars * interval_min * 4)
+            backtest_ticks = []  # 数据加载后从 panel 时间戳重建
+            loaded_days = pd.DatetimeIndex([])
 
         # --- setup（设置 universe）与数据加载 ---
         if self._initial_portfolio is not None:
             portfolio = self._initial_portfolio
         else:
             portfolio = Portfolio(initial_cash=cfg.initial_cash, cash=cfg.initial_cash)
-        state = EngineState(dates=list(loaded_days), panel={}, params=strategy.params, portfolio=portfolio)
+        state = EngineState(dates=[], panel={}, params=strategy.params, portfolio=portfolio)
         state.pending = list(self._initial_pending or [])
         ctx = Context(state)
-        state.now = loaded_days[0]
+        state.now = start_ts
         strategy.setup(ctx)
         if not ctx.universe:
             raise err(
@@ -180,7 +202,16 @@ class BacktestEngine:
             benchmark = validate_symbols([cfg.benchmark])[0].value
         symbols = sorted(set(universe) | ({benchmark} if benchmark else set()))
 
-        data = self.store.load_bars(symbols, start=warmup_start, end=end_ts)
+        # 期货+分钟：不支持组合（fail-fast，在数据加载前拦截）
+        futures_in_universe = [s for s in universe if parse_symbol(s).is_futures]
+        if futures_in_universe and cfg.freq != "1d":
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                "期货回测暂不支持分钟频率",
+                hint="期货请使用日线（freq='1d'）；分钟线仅供股票研究",
+            )
+
+        data = self.store.load_bars(symbols, start=load_start, end=end_ts, freq=cfg.freq)
         panel: dict[str, pd.DataFrame] = {}
         for symbol, part in data.groupby("symbol"):
             frame = part.drop(columns=["symbol"]).set_index("date").sort_index()
@@ -195,8 +226,32 @@ class BacktestEngine:
             )
         state.panel = panel
 
+        if cfg.freq == "1d":
+            ticks = list(loaded_days)
+        else:
+            # 分钟：时钟 = 全部 bar 时间戳并集（跨标的对齐）
+            ticks = sorted({ts for frame in panel.values() for ts in frame.index})
+        state.dates = ticks
+
+        if cfg.freq == "1d":
+            pass  # backtest_ticks 已由日历得出
+        else:
+            backtest_ticks = [t for t in ticks if start_ts <= t <= end_ts]
+            if not backtest_ticks:
+                raise err(
+                    ErrorCode.NO_DATA,
+                    f"回测区间 {start_ts.date()}~{end_ts.date()} 内没有分钟 bar",
+                    hint="先执行 srq data update --freq 1m/5m 补充分钟数据",
+                )
+
         # --- 期货：合约规格/乘数/费用模型（品种路由依据） ---
         futures_symbols = [s for s in symbols if parse_symbol(s).is_futures]
+        if futures_symbols and cfg.freq != "1d":
+            raise err(
+                ErrorCode.PARAM_INVALID,
+                "期货回测暂不支持分钟频率",
+                hint="期货请使用日线（freq='1d'）；分钟线仅供股票研究",
+            )
         spec_map = {s: get_contract_spec(s, cfg.futures_spec_overrides) for s in futures_symbols}
         portfolio.multipliers = {s: spec.multiplier for s, spec in spec_map.items()}
         if futures_symbols and cfg.futures_cost_model is None:
@@ -218,11 +273,20 @@ class BacktestEngine:
         corp_actions: list[dict] = []
         opened_today: dict[str, float] = {}  # 期货：当日开仓手数（平今费率拆分）
 
-        backtest_days = [d for d in loaded_days if d >= day_index[0]]
-        for day in backtest_days:
+        tick_idx = {t: i for i, t in enumerate(ticks)}
+        cur_date: pd.Timestamp | None = None  # 当前交易日（日内 T+1 解锁只在换日时发生）
+
+        for day in backtest_ticks:  # 日频=交易日；分钟=bar 时间戳
             state.now = day
-            state.now_idx = int(loaded_days.searchsorted(day))
+            state.now_idx = tick_idx[day]
             today_bars = {s: panel[s].loc[day] for s in panel if day in panel[s].index}
+
+            # 0) 交易日切换（分钟模式在换日时解锁 T+1 与平今计数；日频每 tick 换日）
+            tick_date = pd.Timestamp(day).normalize()
+            if tick_date != cur_date:
+                cur_date = tick_date
+                portfolio.release_available()
+                opened_today = {}
 
             # 1) 公司行为：复权因子变化 → 持仓调整（主连换月比例复权同样走这里）
             for symbol, bar in today_bars.items():
@@ -240,12 +304,9 @@ class BacktestEngine:
                         corp_actions.append({"date": day, "symbol": symbol, "ratio": ratio, "shares_before": before})
                 last_factor[symbol] = factor
 
-            # 2) T+1 解锁（期货 T+0：release 后 available = shares，效果一致）
-            portfolio.release_available()
-            opened_today = {}
-
-            # 2.5) 期货到期强平：到期日（含）之后强制离场
-            self._handle_futures_expiry(state, spec_map, contract_expiry, day, today_bars)
+            # 2.5) 期货到期强平：到期日（含）之后强制离场（仅日频）
+            if cfg.freq == "1d":
+                self._handle_futures_expiry(state, spec_map, contract_expiry, day, today_bars)
 
             if cfg.execution == "next_open":
                 # 3) 撮合昨日信号（开盘价）
@@ -295,15 +356,28 @@ class BacktestEngine:
         trades_df = pd.DataFrame(self._trade_records)
         rejections_df = pd.DataFrame(state.rejections)
         corp_df = pd.DataFrame(corp_actions)
-        benchmark_series = self._benchmark_series(panel, benchmark, loaded_days, day_index[0])
+        benchmark_series = self._benchmark_series(
+            panel, benchmark, ticks[-1] if ticks else backtest_ticks[0], backtest_ticks[0]
+        )
 
         from solidrock.report.metrics import compute_metrics
 
-        metrics = compute_metrics(
-            nav_df["total"] if not nav_df.empty else pd.Series(dtype="float64"),
-            benchmark_series,
-            trades_df if not trades_df.empty else None,
-        )
+        nav_total = nav_df["total"] if not nav_df.empty else pd.Series(dtype="float64")
+        if cfg.freq != "1d" and not nav_total.empty:
+            # 分钟回测：指标按日重采样（最后 bar 即当日收盘），保证年化口径一致
+            nav_daily = nav_total.groupby(nav_total.index.normalize()).last()
+            bench_daily = (
+                benchmark_series.groupby(benchmark_series.index.normalize()).last()
+                if benchmark_series is not None
+                else None
+            )
+            metrics = compute_metrics(nav_daily, bench_daily, trades_df if not trades_df.empty else None)
+        else:
+            metrics = compute_metrics(
+                nav_total,
+                benchmark_series,
+                trades_df if not trades_df.empty else None,
+            )
 
         result = BacktestResult(
             run_id=f"bt-{pd.Timestamp.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}",
@@ -547,7 +621,7 @@ class BacktestEngine:
         self,
         panel: dict[str, pd.DataFrame],
         benchmark: str | None,
-        loaded_days: pd.DatetimeIndex,
+        last_loaded_day: pd.Timestamp,
         first_backtest_day: pd.Timestamp,
     ) -> pd.Series | None:
         if benchmark is None or benchmark not in panel:
@@ -557,7 +631,7 @@ class BacktestEngine:
         # 无更早数据（warmup 不足）时退化为区间首日
         hfq_close = (frame["close"] * frame["adj_factor"].fillna(1.0)).dropna()
         base_idx = hfq_close.index[hfq_close.index < first_backtest_day]
-        window = hfq_close[(hfq_close.index >= first_backtest_day) & (hfq_close.index <= loaded_days[-1])]
+        window = hfq_close[(hfq_close.index >= first_backtest_day) & (hfq_close.index <= last_loaded_day)]
         if window.empty:
             return None
         base = hfq_close.loc[base_idx[-1]] if not base_idx.empty else window.iloc[0]

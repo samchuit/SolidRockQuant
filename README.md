@@ -132,6 +132,9 @@ src/solidrock/
 | [docs/roadmap.md](docs/roadmap.md) | 路线图与任务拆解 |
 | [docs/mcp-setup.md](docs/mcp-setup.md) | Claude Code / Claude Desktop 接入配置 |
 | [docs/plugins.md](docs/plugins.md) | 数据源/因子插件开发指南 |
+| [docs/agent-workflow.md](docs/agent-workflow.md) | Agent 研究闭环实战 playbook |
+| [docs/tutorial-agent-research.md](docs/tutorial-agent-research.md) | 实战教程：让 Claude 做因子研究 |
+| [文档站](https://samchuit.github.io/SolidRockQuant/) | 全部文档的在线版本 |
 | [docs/release.md](docs/release.md) | 版本发布流程 |
 | [llms.txt](llms.txt) | 面向 LLM 的项目速览 |
 
