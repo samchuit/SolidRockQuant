@@ -379,6 +379,61 @@ def _run_vectorized_backtest(
     }
 
 
+def _run_sandboxed_backtest(
+    strategy_file: str,
+    start: str,
+    end: str,
+    params: dict[str, Any] | None = None,
+    benchmark: str | None = "000300.SH",
+    timeout: float = 300.0,
+    name: str | None = None,
+) -> dict:
+    """沙箱回测：子进程隔离执行，坏策略（死循环/崩溃）不影响宿主。"""
+    from solidrock.agent.sandbox import run_sandboxed_backtest as _sandbox_run
+
+    return _sandbox_run(
+        strategy_file,
+        start=start,
+        end=end,
+        data_dir=str(get_settings().resolved_data_dir()),
+        params=params,
+        benchmark=benchmark,
+        execution="next_open",
+        name=name,
+        timeout=timeout,
+    )
+
+
+def _paper_session(
+    strategy_file: str,
+    name: str,
+    start: str | None = None,
+    end: str | None = None,
+    params: dict[str, Any] | None = None,
+    initial_cash: float = 1_000_000.0,
+) -> dict:
+    from solidrock.backtest.paper import PaperTrader
+
+    cfg = BacktestConfig(
+        start=start or "1990-01-01",
+        end=end or "2099-12-31",
+        benchmark=None,
+        initial_cash=initial_cash,
+        log_experiment=False,
+    )
+    trader = PaperTrader(strategy_file, cfg, _store(), name=name, params=params)
+    summary = trader.run(end=end)
+    summary["note"] = "模拟盘建议每交易日收盘后运行一次；跳过的交易日的公司行为不追溯调整"
+    return summary
+
+
+def _paper_status(name: str) -> dict:
+    from solidrock.backtest.paper import PaperTrader
+
+    cfg = BacktestConfig(start="1990-01-01", end="2099-12-31", benchmark=None)
+    return PaperTrader("unknown", cfg, _store(), name=name).status()
+
+
 def _list_experiments(kind: str | None = None, limit: int = 20) -> dict:
     runs = _tracker().list_runs(kind=kind, limit=limit)
     compact = [
@@ -612,6 +667,61 @@ def tool_run_vectorized_backtest(
     )
 
 
+def tool_run_backtest_sandboxed(
+    strategy_file: str,
+    start: str,
+    end: str,
+    params: dict[str, Any] | None = None,
+    benchmark: str | None = "000300.SH",
+    timeout: float = 300.0,
+    name: str | None = None,
+) -> str:
+    """[工具] 沙箱回测：子进程隔离执行（死循环/崩溃的策略不会拖垮会话）.
+
+    用法与 run_backtest 相同；超出 timeout 秒会被强制终止并返回 TIMEOUT
+    错误。不确定策略质量时优先用本工具。
+    """
+    return _run_tool(
+        _run_sandboxed_backtest,
+        strategy_file=strategy_file,
+        start=start,
+        end=end,
+        params=params,
+        benchmark=benchmark,
+        timeout=timeout,
+        name=name,
+    )
+
+
+def tool_run_paper_session(
+    strategy_file: str,
+    name: str,
+    start: str | None = None,
+    end: str | None = None,
+    params: dict[str, Any] | None = None,
+    initial_cash: float = 1_000_000.0,
+) -> str:
+    """[工具] 运行模拟盘会话（状态持久化，建议每交易日收盘后调用一次）.
+
+    首次调用初始化（start 为起点）；之后每次调用增量处理新交易日：
+    昨日订单今日开盘撮合、今日收盘产出新订单。params 仅首次生效。
+    """
+    return _run_tool(
+        _paper_session,
+        strategy_file=strategy_file,
+        name=name,
+        start=start,
+        end=end,
+        params=params,
+        initial_cash=initial_cash,
+    )
+
+
+def tool_paper_status(name: str) -> str:
+    """[工具] 查看模拟盘当前状态（现金/持仓/待执行订单/最后处理日）。"""
+    return _run_tool(_paper_status, name=name)
+
+
 def tool_list_data_sources() -> str:
     """[工具] 列出可用数据源及其能力。"""
 
@@ -635,4 +745,7 @@ ALL_TOOLS: dict[str, Any] = {
     "compare_experiments": tool_compare_experiments,
     "run_factor_analysis": tool_run_factor_analysis,
     "run_vectorized_backtest": tool_run_vectorized_backtest,
+    "run_backtest_sandboxed": tool_run_backtest_sandboxed,
+    "run_paper_session": tool_run_paper_session,
+    "paper_status": tool_paper_status,
 }

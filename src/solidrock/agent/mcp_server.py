@@ -211,6 +211,60 @@ def build_server() -> Any:
             name=name,
         )
 
+    @mcp.tool()
+    def run_backtest_sandboxed(
+        strategy_file: str,
+        start: str,
+        end: str,
+        params: dict[str, Any] | None = None,
+        benchmark: str | None = "000300.SH",
+        timeout: float = 300.0,
+        name: str | None = None,
+    ) -> str:
+        """沙箱回测：子进程隔离执行（策略死循环/崩溃不影响本会话）。
+
+        参数与 run_backtest 相同；timeout 秒后强制终止并返回 TIMEOUT。
+        不确定策略质量时优先用本工具而非 run_backtest。
+        """
+        return t.tool_run_backtest_sandboxed(
+            strategy_file=strategy_file,
+            start=start,
+            end=end,
+            params=params,
+            benchmark=benchmark,
+            timeout=timeout,
+            name=name,
+        )
+
+    @mcp.tool()
+    def run_paper_session(
+        strategy_file: str,
+        name: str,
+        start: str | None = None,
+        end: str | None = None,
+        params: dict[str, Any] | None = None,
+        initial_cash: float = 1_000_000.0,
+    ) -> str:
+        """运行模拟盘会话（状态持久化，建议每交易日收盘后调用一次）。
+
+        首次调用初始化组合（start 为回放起点）；之后每次调用增量处理新
+        交易日：昨日订单今日开盘撮合、今日收盘产出新订单并落盘。params
+        仅首次生效；name 是模拟盘的唯一标识。
+        """
+        return t.tool_run_paper_session(
+            strategy_file=strategy_file,
+            name=name,
+            start=start,
+            end=end,
+            params=params,
+            initial_cash=initial_cash,
+        )
+
+    @mcp.tool()
+    def paper_status(name: str) -> str:
+        """查看模拟盘当前状态：现金、持仓、待执行订单、最后处理日期。"""
+        return t.tool_paper_status(name=name)
+
     return mcp
 
 

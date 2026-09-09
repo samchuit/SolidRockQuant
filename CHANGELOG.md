@@ -5,7 +5,15 @@
 
 ## [Unreleased]
 
-（无）
+### 新增（v0.3）
+
+- **策略沙箱**：子进程隔离执行回测，超时击杀（`TIMEOUT` 错误码），策略 `sys.exit`/死循环不影响宿主；MCP `run_backtest_sandboxed`
+- **模拟盘**：`PaperTrader` 状态持久化（现金/持仓/待执行订单/复权因子游标 JSON 落盘），增量日频运行，复用事件引擎全部规则；引擎新增 `initial_portfolio/initial_pending/initial_last_factors` 注入与 `carry_pending` 挂单携带；CLI `srq paper run/status`、MCP `run_paper_session/paper_status`
+- **Agent 研究闭环示例**：examples/agent-workflow.md
+
+### 修复
+
+- 引擎 `final_pending` 仅在 `carry_pending` 模式输出（回测模式下此前被错误填充）
 
 ## [0.2.0] - 2026-09-08
 

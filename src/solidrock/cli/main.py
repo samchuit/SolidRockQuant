@@ -466,6 +466,82 @@ def factor_screen(
     console.print(f"产物目录：{data['artifacts'][0]}", style="dim")
 
 
+# ----------------------------------------------------------------- paper
+paper_app = typer.Typer(help="模拟盘（状态持久化的日频 paper trading）", no_args_is_help=True)
+app.add_typer(paper_app, name="paper")
+
+
+@paper_app.command("run")
+def paper_run(
+    strategy_file: Path = typer.Argument(..., help="策略文件路径（内含一个 Strategy 子类）"),
+    name: str = typer.Option(..., "--name", help="模拟盘名称（状态持久化的键）"),
+    start: str | None = typer.Option(None, "--start", help="首次运行的起点 YYYY-MM-DD"),
+    end: str | None = typer.Option(None, "--end", help="处理到哪一天（默认今天）"),
+    cash: float = typer.Option(1_000_000.0, "--cash", help="初始资金（仅首次运行生效）"),
+    param: list[str] = typer.Option([], "--param", "-p", help="策略参数 k=v（仅首次运行生效）"),
+) -> None:
+    """运行模拟盘：首次初始化并跑到最新交易日；之后增量处理新交易日.
+
+    建议每交易日收盘后运行一次（可由系统计划任务调度）。
+    """
+    from solidrock.backtest import BacktestConfig
+    from solidrock.backtest.paper import PaperTrader
+    from solidrock.strategy.loader import load_strategy_class, parse_param_pairs
+
+    params = parse_param_pairs(list(param))
+    cfg = BacktestConfig(
+        start=start or "1990-01-01", end=end or "2099-12-31", benchmark=None, initial_cash=cash, log_experiment=False
+    )
+    try:
+        load_strategy_class(strategy_file)  # 提前校验文件可加载
+        trader = PaperTrader(str(strategy_file), cfg, _store(), name=name, params=params)
+        summary = trader.run(end=end)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+
+    if not summary.get("ran"):
+        console.print(f"模拟盘 [cyan]{name}[/cyan]：{summary['note']}")
+        return
+    table = Table(title=f"模拟盘 {name} · 处理至 {summary['last_date']}")
+    table.add_column("项目", style="cyan")
+    table.add_column("数值", justify="right")
+    table.add_row("现金", f"{summary['cash']:,.2f}")
+    for symbol, pos in summary["positions"].items():
+        table.add_row(f"持仓 {symbol}", f"{pos['shares']:.0f} 股 @ {pos['last_price']:.2f}")
+    table.add_row("今日成交", f"{len(summary['trades'])} 笔")
+    table.add_row("待执行订单", f"{len(summary['pending_orders'])} 笔")
+    console.print(table)
+
+
+@paper_app.command("status")
+def paper_status(
+    name: str = typer.Option(..., "--name"),
+) -> None:
+    """查看模拟盘当前状态。"""
+    from solidrock.backtest import BacktestConfig
+    from solidrock.backtest.paper import PaperTrader
+
+    try:
+        info = PaperTrader(
+            "unknown", BacktestConfig(start="1990-01-01", end="2099-12-31"), _store(), name=name
+        ).status()
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    table = Table(title=f"模拟盘 {name}")
+    table.add_column("项目", style="cyan")
+    table.add_column("数值")
+    table.add_row("策略", info["strategy"])
+    table.add_row("最后处理日", str(info["last_date"]))
+    table.add_row("现金", f"{info['cash']:,.2f}")
+    for symbol, pos in info["positions"].items():
+        table.add_row(f"持仓 {symbol}", f"{pos['shares']:.0f} 股 @ {pos['last_price']:.2f}")
+    table.add_row("待执行订单", str(len(info["pending_orders"])))
+    table.add_row("运行次数", str(info["run_count"]))
+    console.print(table)
+
+
 # ----------------------------------------------------------------- experiment
 @experiment_app.command("list")
 def experiment_list(

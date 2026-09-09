@@ -63,13 +63,13 @@
 - [x] **向量化快速回测通道**：`vectorized_backtest` + `weights_from_factor`（多空分位、防前视、换手费率）；CLI `srq factor screen`、MCP `run_vectorized_backtest`
 - [x] 期货指标语义细化（`closing` 字段区分开/平，胜率/盈亏比只按平仓计）
 
-## v0.3 —— 走向实盘
+## v0.3 —— 走向实盘（进行中）
 
-- 模拟盘（paper trading）：引擎对接实时/延迟行情，每日定时跑
-- 期货实盘：CTP / openctp 网关（依赖 vnpy gateway 或独立实现，届时评估）
+- [x] **模拟盘**：`PaperTrader` 状态持久化（现金/持仓/挂单/复权因子游标），增量日频运行，复用事件引擎全部规则（T+1/涨跌停/保证金/到期强平）；CLI `srq paper run/status`、MCP `run_paper_session/paper_status`
+- [ ] 期货实盘：CTP / openctp 网关（需要券商账户与 CTP 环境联调，暂缓）
 - 股票自动交易：先做只读对账（持仓核对），下单接口涉及券商合规，单独评估后决定
-- 策略沙箱执行（子进程 + 资源限制）
-- 多 Agent 工作流示例：策略生成 Agent → 回测验证 Agent → 报告 Agent 的完整 demo
+- [x] **策略沙箱**：子进程隔离执行 + 超时击杀（策略 sys.exit/死循环不影响宿主）；MCP `run_backtest_sandboxed`
+- [x] **Agent 研究闭环示例**：examples/agent-workflow.md（筛选→显著性→回测→对比→模拟盘的完整 playbook）
 
 ## v0.4 —— 生态
 

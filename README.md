@@ -104,7 +104,7 @@ srq data snapshot create snap-20260908    # 数据版本快照（实验复现）
 }
 ```
 
-Claude 等 Agent 即可获得 13 个工具，研究闭环无需人工干预。详细配置见 [docs/mcp-setup.md](docs/mcp-setup.md)，Agent 操作指南见 `src/solidrock/agent/skills/`。
+Claude 等 Agent 即可获得 16 个工具，研究闭环无需人工干预。详细配置见 [docs/mcp-setup.md](docs/mcp-setup.md)，Agent 操作指南见 `src/solidrock/agent/skills/`。
 
 ## 项目结构
 

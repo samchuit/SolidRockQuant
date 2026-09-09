@@ -53,6 +53,8 @@ srq mcp serve                # stdio 模式，接入真实客户端
 | `get_trading_calendar` | 查询/更新交易日历 |
 | `validate_strategy` | 策略静态检查（前视偏差/API 误用） |
 | `run_backtest` | 运行回测（自动校验 + 留痕） |
+| `run_backtest_sandboxed` | 沙箱回测（子进程隔离，坏策略不影响会话） |
+| `run_paper_session` / `paper_status` | 模拟盘：状态持久化的日频跟踪 |
 | `run_factor_analysis` | 因子分析（RankIC + 分层） |
 | `run_vectorized_backtest` | 向量化因子筛选（快速净值） |
 | `list_experiments` / `get_experiment` / `compare_experiments` | 实验追踪查询与对比 |

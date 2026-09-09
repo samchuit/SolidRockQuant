@@ -49,6 +49,7 @@ class ErrorCode(str, Enum):
 
     # --- 其他 ---
     INTERNAL_ERROR = "INTERNAL_ERROR"  # 未预期的框架错误（应附复现步骤报 issue）
+    TIMEOUT = "TIMEOUT"  # 沙箱/任务超时被终止
 
 
 class SolidRockError(Exception):

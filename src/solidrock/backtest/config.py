@@ -30,6 +30,7 @@ class BacktestConfig:
     name: str | None = None  # 实验名（默认策略类名）
     notes: str | None = None
     log_experiment: bool = True  # 自动写入实验追踪与产物目录
+    carry_pending: bool = False  # 模拟盘：未执行订单携带到下一时段（回测恒为 False）
 
     def to_dict(self) -> dict:
         out = {

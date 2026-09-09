@@ -85,7 +85,10 @@ class BacktestResult:
     strategy_logs: list[str]
     data_snapshot: str | None
     artifacts_dir: Path | None
-    final_positions: dict[str, dict] = None  # type: ignore[assignment]  # {symbol: {shares, avg_cost, last_price}}
+    final_positions: dict[str, dict] = None  # type: ignore[assignment]  # {symbol: {shares, available, avg_cost, last_price}}
+    final_pending: list[dict] = None  # type: ignore[assignment]  # 未执行订单（carry_pending 模式）
+    final_cash: float = 0.0
+    final_factors: dict[str, float] = None  # type: ignore[assignment]  # 复权因子游标（模拟盘续用）
 
     def summary(self) -> dict:
         """关键指标摘要（供 CLI/MCP 打印）。"""
@@ -113,10 +116,20 @@ class BacktestEngine:
         strategy: Strategy | type[Strategy],
         config: BacktestConfig,
         store: DataStore,
+        *,
+        initial_portfolio: Portfolio | None = None,
+        initial_pending: list[Order] | None = None,
+        initial_last_factors: dict[str, float] | None = None,
     ) -> None:
+        """``initial_portfolio``/``initial_pending``/``initial_last_factors``：
+        模拟盘增量运行时注入的持久化状态（见 backtest/paper.py）；
+        回测场景留空即可。"""
         self.config = config
         self.store = store
         self._strategy = strategy
+        self._initial_portfolio = initial_portfolio
+        self._initial_pending = initial_pending
+        self._initial_last_factors = initial_last_factors
 
     # ------------------------------------------------------------------ 入口
     def run(self) -> BacktestResult:
@@ -146,8 +159,12 @@ class BacktestEngine:
         loaded_days = loaded_days[loaded_days <= end_ts]
 
         # --- setup（设置 universe）与数据加载 ---
-        portfolio = Portfolio(initial_cash=cfg.initial_cash, cash=cfg.initial_cash)
+        if self._initial_portfolio is not None:
+            portfolio = self._initial_portfolio
+        else:
+            portfolio = Portfolio(initial_cash=cfg.initial_cash, cash=cfg.initial_cash)
         state = EngineState(dates=list(loaded_days), panel={}, params=strategy.params, portfolio=portfolio)
+        state.pending = list(self._initial_pending or [])
         ctx = Context(state)
         state.now = loaded_days[0]
         strategy.setup(ctx)
@@ -197,7 +214,7 @@ class BacktestEngine:
         halt = DrawdownHalt(cfg.drawdown_halt) if cfg.drawdown_halt else None
 
         nav_rows: list[dict] = []
-        last_factor: dict[str, float] = {}
+        last_factor: dict[str, float] = dict(self._initial_last_factors or {})
         corp_actions: list[dict] = []
         opened_today: dict[str, float] = {}  # 期货：当日开仓手数（平今费率拆分）
 
@@ -253,18 +270,21 @@ class BacktestEngine:
                     state.halted = True
                     self._queue_liquidation(state, day)
 
-        # 收尾：on_stop 产生的订单与未执行订单一并记为 NO_MORE_BARS
+        # 收尾：on_stop 产生的订单与未执行订单——回测记为 NO_MORE_BARS，
+        # 模拟盘（carry_pending）携带到下一交易时段
         strategy.on_stop(ctx)
-        for order in state.pending:
-            state.rejections.append(
-                {
-                    "date": state.now,
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "qty": order.qty,
-                    "code": "NO_MORE_BARS",
-                }
-            )
+        final_pending = list(state.pending)
+        if not cfg.carry_pending:
+            for order in state.pending:
+                state.rejections.append(
+                    {
+                        "date": state.now,
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "qty": order.qty,
+                        "code": "NO_MORE_BARS",
+                    }
+                )
         state.pending.clear()
 
         nav_df = (
@@ -301,12 +321,20 @@ class BacktestEngine:
             final_positions={
                 symbol: {
                     "shares": pos.shares,
+                    "available": pos.available,
                     "avg_cost": pos.avg_cost,
                     "last_price": pos.last_price,
                 }
                 for symbol, pos in portfolio.positions.items()
-                if pos.shares > 0
+                if abs(pos.shares) > 1e-9
             },
+            final_pending=(
+                [{"symbol": o.symbol, "side": o.side, "qty": o.qty, "source": o.source} for o in final_pending]
+                if cfg.carry_pending
+                else []
+            ),
+            final_cash=portfolio.cash,
+            final_factors=dict(last_factor),
         )
         if cfg.log_experiment:
             self._log_experiment(result)

@@ -19,7 +19,7 @@
 
 ## MCP 工具（`srq mcp serve`，统一 JSON 信封）
 
-get_data_overview / data_health / list_data_sources / search_instruments / fetch_bars（支持 1d/1m/5m）/ get_trading_calendar / validate_strategy / run_backtest / run_factor_analysis / run_vectorized_backtest / list_experiments / get_experiment / compare_experiments
+get_data_overview / data_health / list_data_sources / search_instruments / fetch_bars（1d/1m/5m）/ get_trading_calendar / validate_strategy / run_backtest / run_backtest_sandboxed / run_factor_analysis / run_vectorized_backtest / run_paper_session / paper_status / list_experiments / get_experiment / compare_experiments
 
 ## 错误约定
 
