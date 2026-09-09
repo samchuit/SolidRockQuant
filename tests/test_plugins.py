@@ -6,6 +6,7 @@ import importlib
 import sys
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from solidrock.agent.errors import ErrorCode, SolidRockError
@@ -26,8 +27,8 @@ class _FakeSelection:
 @pytest.fixture
 def plugin_env(monkeypatch: pytest.MonkeyPatch):
     """安装假插件模块 + 假 entry-points，测试后清理注册表。"""
-    from solidrock.data.sources import Capability, DataSource, register_source
     from solidrock.data.schema import DAILY_BAR_COLUMN_NAMES
+    from solidrock.data.sources import Capability, DataSource, register_source
     from solidrock.factors import Factor, register_factor
 
     @register_source
@@ -49,8 +50,6 @@ def plugin_env(monkeypatch: pytest.MonkeyPatch):
         def compute(self, data):  # type: ignore[no-untyped-def]
             return data.hfq_close().pct_change(5)
 
-    from tests.conftest import install_fake_module
-
     install_fake_module("myplug.sources", MySource=MySource)
     install_fake_module("myplug.factors", MyMomentum=MyMomentum)
 
@@ -59,7 +58,8 @@ def plugin_env(monkeypatch: pytest.MonkeyPatch):
         _FakeEP("MyMomentum", "solidrock.factors", "myplug.factors:MyMomentum"),
     ]
     monkeypatch.setattr(
-        "solidrock.plugins.entry_points", lambda **kw: _FakeSelection(eps, kw.get("group", ""))  # type: ignore[arg-type]
+        "solidrock.plugins.entry_points",
+        lambda **kw: _FakeSelection(eps, kw.get("group", "")),  # type: ignore[arg-type]
     )
     from solidrock import plugins
 

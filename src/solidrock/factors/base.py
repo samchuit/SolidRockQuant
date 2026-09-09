@@ -144,8 +144,7 @@ def create_factor(name: str, **params: Any) -> Factor:
         raise err(
             ErrorCode.SOURCE_NOT_REGISTERED,
             f"未注册的因子 {name!r}",
-            hint=f"已注册因子：{sorted(_FACTOR_REGISTRY)}；"
-            "第三方因子可通过 entry-points 组 solidrock.factors 接入",
+            hint=f"已注册因子：{sorted(_FACTOR_REGISTRY)}；第三方因子可通过 entry-points 组 solidrock.factors 接入",
         )
     return cls(**params)
 

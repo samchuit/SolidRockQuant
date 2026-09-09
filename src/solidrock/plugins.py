@@ -53,7 +53,7 @@ def discover_plugins(group: str | None = None) -> dict[str, list[str]]:
             try:
                 ep.load()
                 names.append(ep.name)
-            except Exception as exc:  # noqa: BLE001 —— 单个插件坏了不拖垮框架
+            except Exception as exc:
                 names.append(f"{ep.name} (加载失败: {type(exc).__name__})")
         _discovered.add(g)
         loaded[g] = names
