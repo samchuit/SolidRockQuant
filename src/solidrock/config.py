@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     default_source: str = "akshare"
     tushare_token: str | None = None
 
+    # --- 实盘（QMT / cfquant 桥接） ---
+    live_account_id: str | None = None  # QMT 资金账号（SOLIDROCK_LIVE_ACCOUNT_ID）
+    live_account_type: str = "STOCK"  # STOCK / CREDIT / FUTURE 等
+    live_read_only: bool = True  # 只读模式：True 时禁止下单/撤单（安全默认，实盘下单显式关闭）
+
     # --- 交易费用默认值（M3 回测使用） ---
     commission_rate: float = 2.5e-4  # 佣金 万2.5
     commission_min: float = 5.0  # 单笔最低佣金（元）

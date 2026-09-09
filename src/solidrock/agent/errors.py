@@ -51,6 +51,11 @@ class ErrorCode(str, Enum):
     INTERNAL_ERROR = "INTERNAL_ERROR"  # 未预期的框架错误（应附复现步骤报 issue）
     TIMEOUT = "TIMEOUT"  # 沙箱/任务超时被终止
 
+    # --- 实盘（live，v0.3+） ---
+    LIVE_UNAVAILABLE = "LIVE_UNAVAILABLE"  # 实盘通道不可用（cfquant 未安装/QMT 离线）
+    LIVE_ORDER_FAILED = "LIVE_ORDER_FAILED"  # 实盘下单/撤单被拒绝
+    LIVE_READ_ONLY = "LIVE_READ_ONLY"  # 实盘通道配置为只读，禁止下单
+
 
 class SolidRockError(Exception):
     """框架内所有受检错误的基类。"""

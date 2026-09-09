@@ -265,6 +265,64 @@ def build_server() -> Any:
         """查看模拟盘当前状态：现金、持仓、待执行订单、最后处理日期。"""
         return t.tool_paper_status(name=name)
 
+    @mcp.tool()
+    def live_status() -> str:
+        """查询 QMT 实盘账户资金与持仓（只读，需 cfquant 桥接在线）。
+
+        返回资金明细与全部持仓。实盘工具默认只读；下单需配置
+        SOLIDROCK_LIVE_READ_ONLY=false 并与用户二次确认。
+        """
+        return t.tool_live_status()
+
+    @mcp.tool()
+    def live_orders(cancelable_only: bool = False) -> str:
+        """查询实盘委托（cancelable_only=True 时只查可撤委托）。"""
+        return t.tool_live_orders(cancelable_only=cancelable_only)
+
+    @mcp.tool()
+    def live_trades() -> str:
+        """查询实盘成交记录。"""
+        return t.tool_live_trades()
+
+    @mcp.tool()
+    def live_submit_order(
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float | None = None,
+        strategy_name: str = "solidrock-agent",
+    ) -> str:
+        """向 QMT 提交实盘订单（真实资金！只读模式下会返回 LIVE_READ_ONLY 错误）.
+
+        symbol 为统一符号（如 000001.SZ）；side: buy/sell；qty: 股数（买入须
+        100 股整手）；price: None=最新价市价，给定则为限价。**调用前必须与
+        用户就标的/方向/数量完成二次确认**；下单自动写入审计日志。
+        """
+        return t.tool_live_submit_order(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            price=price,
+            strategy_name=strategy_name,
+        )
+
+    @mcp.tool()
+    def live_cancel_order(order_id: str) -> str:
+        """撤销实盘委托。"""
+        return t.tool_live_cancel_order(order_id=order_id)
+
+    @mcp.tool()
+    def live_reconcile(
+        paper_name: str | None = None,
+        target: dict[str, int] | None = None,
+    ) -> str:
+        """实盘对账：对比 QMT 实际持仓与目标持仓，只输出差异与建议，不下单.
+
+        paper_name：对比指定模拟盘的持仓；target：手工指定目标，如
+        {"510300.SH": 1000}。二者选一。
+        """
+        return t.tool_live_reconcile(paper_name=paper_name, target=target)
+
     return mcp
 
 

@@ -58,6 +58,9 @@ srq mcp serve                # stdio 模式，接入真实客户端
 | `run_factor_analysis` | 因子分析（RankIC + 分层） |
 | `run_vectorized_backtest` | 向量化因子筛选（快速净值） |
 | `list_experiments` / `get_experiment` / `compare_experiments` | 实验追踪查询与对比 |
+| `live_status` / `live_orders` / `live_trades` | QMT 实盘查询（资金/持仓/委托/成交） |
+| `live_submit_order` / `live_cancel_order` | 实盘下单/撤单（默认只读模式拒绝） |
+| `live_reconcile` | 实盘对账（实际 vs 目标持仓差异） |
 
 ## 返回信封
 

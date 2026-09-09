@@ -5,7 +5,23 @@
 
 ## [Unreleased]
 
-（下一站：期货 CTP 实盘需券商环境，暂缓）
+（v0.7 规划：策略驱动实盘会话、期货实盘需 CTP 环境）
+
+## [0.6.0] - 2026-09-09
+
+### 新增
+
+- **股票实盘接入（QMT / cfquant 桥接）**：`solidrock/live/` 模块——
+  - `CfquantBroker`：查资金/持仓/委托/成交 + 下单/撤单（xtquant 兼容 API）；
+  - 下单安全：默认只读模式（`SOLIDROCK_LIVE_READ_ONLY=true`），买入整手校验，
+    side/价格/数量参数校验，审计日志（`{data_dir}/live/audit.jsonl`）；
+  - **实盘对账**：`diff_positions` 目标持仓 vs QMT 实际持仓差异报告，
+    `srq live reconcile` 支持 `--paper` 对比模拟盘或 `--target` 手工指定；
+  - CLI `srq live status/orders/trades/order/cancel/reconcile`（下单带交互确认 + dry-run）；
+  - MCP `live_status/live_orders/live_trades/live_submit_order/live_cancel_order/live_reconcile`
+    （工具总数 22）
+- **海外标的符号体系**（提前至 0.6.0）：`AAPL.NASDAQ` / `7203.TSE` 等格式
+- **官方 yfinance 插件**：plugins/solidrock-yfinance（entry-points 接入的参考实现）
 
 ## [0.5.0] - 2026-09-09
 

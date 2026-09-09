@@ -722,6 +722,127 @@ def tool_paper_status(name: str) -> str:
     return _run_tool(_paper_status, name=name)
 
 
+def _live_status() -> dict[str, Any]:
+    from solidrock.live import CfquantBroker
+
+    broker = CfquantBroker(read_only=True)
+    return {"asset": broker.query_asset(), "positions": broker.query_positions()}
+
+
+def _live_orders(cancelable_only: bool) -> dict[str, Any]:
+    from solidrock.live import CfquantBroker
+
+    return {"orders": CfquantBroker(read_only=True).query_orders(cancelable_only=cancelable_only)}
+
+
+def _live_trades() -> dict[str, Any]:
+    from solidrock.live import CfquantBroker
+
+    return {"trades": CfquantBroker(read_only=True).query_trades()}
+
+
+def _live_submit_order(
+    symbol: str,
+    side: str,
+    qty: int,
+    price: float | None,
+    strategy_name: str,
+    order_remark: str,
+) -> dict[str, Any]:
+    from solidrock.live import CfquantBroker
+
+    broker = CfquantBroker(read_only=False)
+    receipt = broker.submit_order(
+        symbol,
+        side,
+        qty,
+        price=price,
+        strategy_name=strategy_name,
+        order_remark=order_remark,
+    )
+    return {**receipt, "symbol": symbol, "side": side, "qty": qty, "price": price}
+
+
+def _live_cancel_order(order_id: str) -> dict[str, Any]:
+    from solidrock.live import CfquantBroker
+
+    return CfquantBroker(read_only=False).cancel_order(order_id)
+
+
+def _live_reconcile(paper_name: str | None, target: dict[str, int] | None) -> dict[str, Any]:
+    from solidrock.live import CfquantBroker, diff_positions
+
+    broker = CfquantBroker(read_only=True)
+    actual = {
+        p.get("stock_code", ""): int(p.get("can_use_volume", p.get("volume", 0)) or 0) for p in broker.query_positions()
+    }
+    if target is None and paper_name:
+        from solidrock.backtest.paper import PaperTrader
+
+        info = PaperTrader(
+            "unknown",
+            BacktestConfig(start="1990-01-01", end="2099-12-31", benchmark=None),
+            _store(),
+            name=paper_name,
+        ).status()
+        target = {s: int(d["shares"]) for s, d in info["positions"].items()}
+    if target is None:
+        raise err(ErrorCode.PARAM_INVALID, "需要 paper_name 或 target 二选一")
+    actions = diff_positions(target, actual)
+    return {"actual": actual, "target": target, "suggested_actions": actions}
+
+
+def tool_live_status() -> str:
+    """[工具] 查询 QMT 实盘账户资金与持仓（只读，需 cfquant 桥接在线）。"""
+    return _run_tool(_live_status)
+
+
+def tool_live_orders(cancelable_only: bool = False) -> str:
+    """[工具] 查询实盘委托（可只查可撤委托）。"""
+    return _run_tool(_live_orders, cancelable_only=cancelable_only)
+
+
+def tool_live_trades() -> str:
+    """[工具] 查询实盘成交。"""
+    return _run_tool(_live_trades)
+
+
+def tool_live_submit_order(
+    symbol: str,
+    side: str,
+    qty: int,
+    price: float | None = None,
+    strategy_name: str = "solidrock-agent",
+) -> str:
+    """[工具] 向 QMT 提交实盘订单（真实资金！默认只读模式会拒绝）.
+
+    side: buy/sell；qty: 股数（买入整手）；price: None=最新价市价。
+    提交前请与用户二次确认标的、方向、数量。审计日志自动记录。
+    """
+    return _run_tool(
+        _live_submit_order,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        price=price,
+        strategy_name=strategy_name,
+        order_remark="mcp",
+    )
+
+
+def tool_live_cancel_order(order_id: str) -> str:
+    """[工具] 撤销实盘委托。"""
+    return _run_tool(_live_cancel_order, order_id=order_id)
+
+
+def tool_live_reconcile(paper_name: str | None = None, target: dict[str, int] | None = None) -> str:
+    """[工具] 实盘对账：对比 QMT 实际持仓与目标（模拟盘持仓或手工指定）.
+
+    只输出差异与建议动作，不自动下单。target 形如 {"510300.SH": 1000}。
+    """
+    return _run_tool(_live_reconcile, paper_name=paper_name, target=target)
+
+
 def tool_list_data_sources() -> str:
     """[工具] 列出可用数据源及其能力。"""
 
@@ -748,4 +869,10 @@ ALL_TOOLS: dict[str, Any] = {
     "run_backtest_sandboxed": tool_run_backtest_sandboxed,
     "run_paper_session": tool_run_paper_session,
     "paper_status": tool_paper_status,
+    "live_status": tool_live_status,
+    "live_orders": tool_live_orders,
+    "live_trades": tool_live_trades,
+    "live_submit_order": tool_live_submit_order,
+    "live_cancel_order": tool_live_cancel_order,
+    "live_reconcile": tool_live_reconcile,
 }

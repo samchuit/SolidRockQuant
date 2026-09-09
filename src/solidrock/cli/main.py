@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import typer
@@ -548,6 +550,197 @@ def paper_status(
     table.add_row("待执行订单", str(len(info["pending_orders"])))
     table.add_row("运行次数", str(info["run_count"]))
     console.print(table)
+
+
+# ----------------------------------------------------------------- live
+live_app = typer.Typer(help="实盘（QMT / cfquant 桥接）——默认只读，下单需显式解除只读", no_args_is_help=True)
+app.add_typer(live_app, name="live")
+
+
+def _broker(read_only: bool | None = None) -> Any:
+    from solidrock.live import CfquantBroker
+
+    return CfquantBroker(read_only=read_only, data_dir=str(get_settings().resolved_data_dir()))
+
+
+@live_app.command("status")
+def live_status() -> None:
+    """查询 QMT 账户资金与持仓（只读）。"""
+    try:
+        broker = _broker(read_only=True)
+        asset = broker.query_asset()
+        positions = broker.query_positions()
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    console.print_json(json.dumps({"asset": asset}, ensure_ascii=False, default=str))
+    if positions:
+        table = Table(title="持仓")
+        for col in ("标的", "数量", "可用", "成本", "现价", "市值"):
+            table.add_column(col, justify="right")
+        for p in positions:
+            table.add_row(
+                str(p.get("stock_code", "-")),
+                str(p.get("volume", "-")),
+                str(p.get("can_use_volume", p.get("open_volume", "-"))),
+                str(p.get("avg_price", p.get("open_price", "-"))),
+                str(p.get("market_value", "-")),
+                str(p.get("market_value", "-")),
+            )
+        console.print(table)
+    else:
+        console.print("（无持仓）", style="dim")
+
+
+@live_app.command("orders")
+def live_orders(
+    cancelable_only: bool = typer.Option(False, "--cancelable", help="只查可撤委托"),
+) -> None:
+    """查询委托。"""
+    try:
+        orders = _broker(read_only=True).query_orders(cancelable_only=cancelable_only)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    if not orders:
+        console.print("（无委托）", style="dim")
+        return
+    console.print_json(json.dumps(orders, ensure_ascii=False, default=str))
+
+
+@live_app.command("trades")
+def live_trades() -> None:
+    """查询成交。"""
+    try:
+        trades = _broker(read_only=True).query_trades()
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    if not trades:
+        console.print("（无成交）", style="dim")
+        return
+    console.print_json(json.dumps(trades, ensure_ascii=False, default=str))
+
+
+@live_app.command("order")
+def live_order(
+    symbol: str = typer.Option(..., "--symbol", "-s", help="统一符号，如 000001.SZ"),
+    side: str = typer.Option(..., "--side", help="buy / sell"),
+    qty: int = typer.Option(..., "--qty", help="股数（买入须整手）"),
+    price: float | None = typer.Option(None, "--price", help="限价（缺省为最新价市价单）"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印订单参数，不提交"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过交互确认"),
+    read_only: bool | None = typer.Option(None, "--read-only/--no-read-only", help="覆盖只读配置"),
+) -> None:
+    """提交实盘订单（默认只读模式会拒绝；真实资金，请谨慎）。"""
+    from solidrock.backtest.costs import AShareCostModel  # noqa: F401
+    from solidrock.live import CfquantBroker
+
+    sym_s: str = symbol.upper()
+    side_s: str = side.lower()
+    params = {
+        "symbol": sym_s,
+        "side": side_s,
+        "qty": qty,
+        "price": price,
+        "price_type": "FIX_PRICE" if price is not None else "LATEST_PRICE",
+    }
+    console.print_json(json.dumps(params, ensure_ascii=False))
+    if dry_run:
+        console.print("[yellow]dry-run：未提交[/yellow]")
+        return
+    if not yes and not typer.confirm(
+        f"确认向实盘提交 {side.upper()} {symbol} {qty} 股（{'限价 ' + str(price) if price else '最新价'}）？"
+    ):
+        raise typer.Abort()
+    try:
+        broker = CfquantBroker(read_only=False, data_dir=str(get_settings().resolved_data_dir()))
+        receipt = broker.submit_order(
+            symbol=sym_s,
+            side=side_s,
+            qty=qty,
+            price=price,
+        )
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    console.print(f"[green]✓[/green] 已提交：order_id={receipt['order_id']}")
+    console.print("审计日志：.solidrock/live/audit.jsonl", style="dim")
+
+
+@live_app.command("cancel")
+def live_cancel(
+    order_id: str = typer.Option(..., "--order-id"),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    read_only: bool | None = typer.Option(None, "--read-only/--no-read-only"),
+) -> None:
+    """撤销委托。"""
+    if not yes and not typer.confirm(f"确认撤销委托 {order_id}？"):
+        raise typer.Abort()
+    try:
+        result = _broker(read_only=False).cancel_order(order_id)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+    console.print(f"[green]✓[/green] 撤单结果：{result}")
+
+
+@live_app.command("reconcile")
+def live_reconcile(
+    paper_name: str | None = typer.Option(None, "--paper", help="对比指定模拟盘的目标持仓"),
+    target: str | None = typer.Option(None, "--target", help="逗号分隔的目标持仓，如 510300.SH:1000,000001.SZ:200"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="自动按差异下单调仓（真实资金！）"),
+) -> None:
+    """实盘对账：对比 QMT 实际持仓与目标（模拟盘或手工指定），输出差异。"""
+    from solidrock.live import diff_positions, render_reconcile_markdown
+
+    try:
+        broker = _broker(read_only=True)
+        actual = {
+            p.get("stock_code", ""): int(p.get("can_use_volume", p.get("volume", 0)) or 0)
+            for p in broker.query_positions()
+        }
+        tgt: dict[str, int] = {}
+        if target:
+            for part in target.split(","):
+                if ":" in part:
+                    sym, qty = part.rsplit(":", 1)
+                    tgt[sym.strip().upper()] = int(qty)
+        elif paper_name:
+            from solidrock.backtest import BacktestConfig
+            from solidrock.backtest.paper import PaperTrader
+
+            info = PaperTrader(
+                "unknown",
+                BacktestConfig(start="1990-01-01", end="2099-12-31", benchmark=None),
+                _store(),
+                name=paper_name,
+            ).status()
+            tgt = {s: int(d["shares"]) for s, d in info["positions"].items()}
+        else:
+            console.print("请指定 --paper <模拟盘名> 或 --target 510300.SH:1000,...", style="yellow")
+            raise typer.Exit(1)
+        actions = diff_positions(tgt, actual)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+
+    md = render_reconcile_markdown(actual, tgt, actions)
+    from rich.markdown import Markdown
+
+    console.print(Markdown(md))
+
+    if actions and yes:
+        if not typer.confirm("以上差异将按建议动作向实盘提交真实订单，确认？"):
+            raise typer.Abort()
+        try:
+            broker = _broker(read_only=False)
+            for a in actions:
+                receipt = broker.submit_order(a["symbol"], a["action"], a["qty"], price=None)
+                console.print(f"✓ {a['action'].upper()} {a['symbol']} {a['qty']} 股 → order_id={receipt['order_id']}")
+        except SolidRockError as e:
+            _print_error(e)
+            raise typer.Exit(1) from e
 
 
 # ----------------------------------------------------------------- experiment

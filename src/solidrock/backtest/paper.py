@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -54,6 +54,7 @@ class PaperState:
     run_count: int
     created_at: str
     updated_at: str
+    multipliers: dict[str, float] = field(default_factory=dict)
 
 
 class PaperTrader:
@@ -188,6 +189,7 @@ class PaperTrader:
             run_count=raw["run_count"],
             created_at=raw["created_at"],
             updated_at=raw["updated_at"],
+            multipliers=raw.get("multipliers", {}),
         )
 
     def _save_state(self, state: PaperState, result, cfg: BacktestConfig) -> None:
@@ -195,6 +197,9 @@ class PaperTrader:
         state.positions = dict(result.final_positions)
         state.pending = list(result.final_pending)
         state.last_factors = dict(result.final_factors)
+        state.multipliers = (
+            dict(result.final_multipliers) if hasattr(result, "final_multipliers") else state.multipliers
+        )
         if result.nav is not None and not result.nav.empty:
             state.last_date = str(result.nav.index[-1].date())
         state.run_count += 1
@@ -208,6 +213,7 @@ class PaperTrader:
     def _restore(self, state: PaperState) -> tuple[Portfolio, list[Order], dict[str, float]]:
         """从持久化状态重建组合、未执行订单与复权因子游标."""
         p = Portfolio(initial_cash=state.initial_cash, cash=state.cash)
+        p.multipliers = dict(state.multipliers)
         for symbol, d in state.positions.items():
             pos = p.positions.setdefault(symbol, Position(symbol=symbol))
             pos.shares = d["shares"]

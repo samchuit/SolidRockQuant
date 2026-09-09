@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "solidrock-quant"
-version = "0.5.0"
+version = "0.6.0"
 description = "SolidRockQuant · 磐石智擎 — Agent 原生的量化研究与回测框架"
 readme = "README.md"
 requires-python = ">=3.10"
