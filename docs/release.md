@@ -4,7 +4,7 @@
 
 | 版本 | 日期 | TestPyPI | PyPI |
 |------|------|----------|------|
-| v0.2.0 | 2026-09-09 | 通过 Trusted Publishing 自动发布 | 待手动触发 |
+| v0.2.0 | 2026-09-09 | ✅ 已发布并安装验证 | ✅ 已发布并安装验证（Trusted Publishing + workflow_dispatch 手动确认） |
 
 ## 前置（一次性）
 
