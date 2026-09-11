@@ -35,6 +35,7 @@ from solidrock.data.sources import create_source, list_sources
 from solidrock.data.store import DataStore
 from solidrock.data.symbols import validate_symbols
 from solidrock.experiments.tracker import ExperimentTracker
+from solidrock.notify import notify_event
 from solidrock.strategy.loader import load_strategy_class
 
 
@@ -807,11 +808,23 @@ def _live_reconcile(
     if target is None:
         raise err(ErrorCode.PARAM_INVALID, "需要 paper_name 或 target 二选一")
     actions = diff_positions(target, actual, available=available, liquidate_untracked=liquidate_untracked)
+    untracked = untracked_positions(target, actual)
+    # 对账出现差异是运维必须知道的事件（守卫差异告警，同一差异 60s 内去重）
+    if actions or untracked:
+        notify_event(
+            "live_reconcile_diff",
+            f"实盘对账发现差异：{len(actions)} 项待调仓、{len(untracked)} 项未跟踪持仓",
+            fields={
+                "actions": ", ".join(f"{a['action']} {a['symbol']} {a['qty']}" for a in actions) or "无",
+                "untracked": ", ".join(f"{i['symbol']} {i['qty']}" for i in untracked) or "无",
+            },
+            dedupe_key=f"{sorted((a['action'], a['symbol'], a['qty']) for a in actions)}",
+        )
     return {
         "actual": actual,
         "available": available,
         "target": target,
-        "untracked": untracked_positions(target, actual),
+        "untracked": untracked,
         "suggested_actions": actions,
     }
 

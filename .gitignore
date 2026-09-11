@@ -45,6 +45,11 @@ research/**/*.pyc
 !research/grid_results.csv
 !research/pit_reeval_results.csv
 !research/sentiment_results.csv
+!research/sentiment_quintile.csv
+!research/sentiment_timing.csv
+!research/shareholder_factor_ic.csv
+!research/shareholder_factor_quintile.csv
+!research/shareholder_factor_align_diagnostic.csv
 !research/event_results_by_type.csv
 !research/event_results_by_year.csv
 !research/csi1000/factor_ic.csv

@@ -23,9 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from solidrock.agent.errors import ErrorCode, err
+from solidrock.agent.errors import ErrorCode, SolidRockError, err
 from solidrock.config import get_settings
 from solidrock.live.guards import LiveOrderGuard
+from solidrock.notify import notify_event
 
 if TYPE_CHECKING:
     from solidrock.config import Settings
@@ -178,7 +179,28 @@ class CfquantBroker:
         if price is not None and price <= 0:
             raise err(ErrorCode.PARAM_INVALID, f"限价必须为正，收到 {price}")
         # 安全闸门：白名单 / 单笔金额上限 / 交易时段 / 幂等去重（不可跳过）
-        guard_ctx = self._guard().check(symbol, side, qty, price=price)
+        try:
+            guard_ctx = self._guard().check(symbol, side, qty, price=price)
+        except SolidRockError as exc:
+            # 被守卫拦下的下单是一次"越界尝试"，属于运维必须知道的事件
+            notify_event(
+                "live_order_blocked",
+                f"实盘下单被安全闸门拦截：{symbol} {side} {qty}",
+                fields={"code": exc.code.value, "reason": exc.message},
+                dedupe_key=f"{exc.code.value}|{symbol}|{side}|{qty}",
+            )
+            self._audit(
+                {
+                    "action": "submit_order_blocked",
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                    "price": price,
+                    "code": exc.code.value,
+                    "message": exc.message,
+                }
+            )
+            raise
         self._connect()
         xtconstant = self._cf["xtconstant"]
         order_type = xtconstant.STOCK_BUY if side == "buy" else xtconstant.STOCK_SELL
@@ -217,11 +239,26 @@ class CfquantBroker:
             }
         )
         if not receipt["accepted"]:
+            notify_event(
+                "live_order_rejected",
+                f"实盘下单被柜台拒绝：{symbol} {side} {qty}",
+                fields={"order_id": order_id, "price": price},
+            )
             raise err(
                 ErrorCode.LIVE_ORDER_FAILED,
                 f"实盘下单被拒绝：order_id={order_id}",
                 hint="检查资金/持仓是否充足、价格是否越界；cfquant Web 控制台可查委托详情",
             )
+        notify_event(
+            "live_order_submitted",
+            f"实盘委托已提交：{symbol} {side} {qty}",
+            fields={
+                "order_id": order_id,
+                "price": price if price is not None else "市价",
+                "notional": guard_ctx.get("notional"),
+                "strategy": strategy_name,
+            },
+        )
         return receipt
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
@@ -230,6 +267,7 @@ class CfquantBroker:
         self._connect()
         result = self._trader.cancel_order_stock(self._account, order_id)
         self._audit({"action": "cancel_order", "order_id": order_id, "result": result})
+        notify_event("live_order_cancelled", f"实盘撤单已提交：{order_id}", fields={"result": result})
         out: dict[str, Any] = {"order_id": order_id, "cancel_result": result}
         return out
 

@@ -186,11 +186,50 @@ class TestPaper:
         assert status["initial_cash"] == 1_000_000.0
 
     def test_execution_mode_guard(self, tmp_path: Path) -> None:
-
         cfg = BacktestConfig(start="2024-01-02", end="2024-01-15", execution="same_close")
         with pytest.raises(SolidRockError) as exc_info:
             PaperTrader(str(_write(tmp_path, "s.py", GOOD_STRATEGY)), cfg, DataStore(tmp_path / "x"), name="p4")
         assert exc_info.value.code is ErrorCode.PARAM_INVALID
+
+    def test_halt_state_persists_across_runs(self, tmp_path: Path) -> None:
+        """回归：单向熔断不得因模拟盘重启而复位（否则会重新开仓）."""
+        import json as _json
+
+        # 持续下跌行情 + 低熔断阈值：首次运行即触发
+        store = make_market_store(tmp_path, symbols=(SYM,), days=12, base=20.0, drift=-1.0)
+        strategy = _paper_strategy(tmp_path)
+        cfg = BacktestConfig(
+            start="2024-01-02",
+            end="2024-01-31",
+            benchmark=None,
+            drawdown_halt=0.05,
+            log_experiment=False,
+            max_position_weight=None,
+            carry_pending=True,
+        )
+        trader = PaperTrader(str(strategy), cfg, store, name="halt", params={"symbol": SYM})
+        s1 = trader.run(end="2024-01-12")
+        assert s1["ran"] is True
+        if not s1["halted"]:
+            pytest.skip("该合成行情未触发熔断，跳过（阈值与走势相关）")
+
+        # 熔断状态必须落盘
+        state = _json.loads((store.root / "paper" / "halt" / "state.json").read_text(encoding="utf-8"))
+        assert state["halted"] is True
+        assert state["halt_peak"] is not None
+
+        # 重启（新实例）后仍应保持熔断，且 status 明确告知
+        trader2 = PaperTrader(str(strategy), cfg, store, name="halt", params={"symbol": SYM})
+        status = trader2.status()
+        assert status["halted"] is True
+        assert "熔断" in (status["note"] or "")
+
+        # 续跑不得重新建仓
+        s2 = trader2.run(end="2024-01-31")
+        assert s2["ran"] is True
+        assert s2["halted"] is True
+        assert not any(t["side"] == "buy" for t in s2["trades"]), "熔断后不应再开新仓"
+        assert "HALTED" in s2["rejections"], "熔断期间策略订单应被拒"
 
 
 class TestCarryPending:

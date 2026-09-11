@@ -117,18 +117,53 @@ def load_extra() -> pd.DataFrame:
 
 stats_index_holder = {"idx": None}
 
+FEE = 0.0005  # 单边成本（仓位切换时按 |Δpos| 计费）
 
-def rank_ic(ind: pd.Series, fwd: pd.Series) -> tuple[float, float]:
-    df = pd.DataFrame({"x": ind, "y": fwd}).dropna()
-    if len(df) < 100:
-        return np.nan, np.nan
-    ic = df["x"].corr(df["y"], method="spearman")
-    t = ic / (df["x"].corr(df["y"], method="spearman") ** 0 + 1)  # 占位
-    # t 值用滚动 IC 标准误近似
-    ics = pd.Series(df.index).astype(str)
-    _ = ics
-    icir = df.groupby(df.index // 20).apply(lambda g: g["x"].corr(g["y"], method="spearman")).mean()
-    return ic, icir
+
+def quintile_returns(ind: pd.Series, fwd: pd.Series, q: int = 5, min_periods: int = 250) -> pd.Series:
+    """按**扩张窗口**分位分组，返回各分位的平均前瞻收益（无前视）.
+
+    分位阈值只用 t 之前的历史（``expanding``），避免"用全样本分位切分历史"
+    这一分位研究里最常见的隐性前视。
+    """
+    idx = ind.dropna().index.intersection(fwd.dropna().index)
+    if len(idx) < min_periods:
+        return pd.Series(dtype=float)
+    x = ind.reindex(idx)
+    y = fwd.reindex(idx)
+    pct = x.expanding(min_periods=min_periods).apply(lambda w: float((w[:-1] < w[-1]).mean()), raw=True)
+    groups = np.ceil(pct * q).clip(1, q)
+    return y.groupby(groups).mean()
+
+
+def timing_backtest(
+    signal: pd.Series,
+    index_ret: pd.Series,
+    *,
+    smooth: int | None = None,
+    fee: float = FEE,
+) -> dict[str, float]:
+    """择时：``signal > 0`` 满仓、否则空仓，与买入持有对比.
+
+    - t 日收盘可得信号 → ``shift(1)`` 作用于 t+1 收益（防前视）；
+    - ``smooth``：信号先做 n 日均线平滑（降低换手）；
+    - 成本：每次仓位变动按 ``|Δpos| × fee`` 扣除。
+    """
+    sig = signal.rolling(smooth).mean() if smooth else signal
+    pos = (sig > 0).astype(float).shift(1).reindex(index_ret.index).fillna(0.0)
+    rets = index_ret.reindex(index_ret.index).fillna(0.0)
+    net = pos * rets - pos.diff().abs().fillna(0.0) * fee
+    nav = (1 + net).cumprod()
+    bh = (1 + rets).cumprod()
+    years = max((nav.index[-1] - nav.index[0]).days / 365.25, 1e-9)
+    return {
+        "annual": float(nav.iloc[-1] ** (1 / years) - 1),
+        "max_dd": float((nav / nav.cummax() - 1).min()),
+        "position_ratio": float(pos.mean()),
+        "bh_annual": float(bh.iloc[-1] ** (1 / years) - 1),
+        "bh_max_dd": float((bh / bh.cummax() - 1).min()),
+        "n_switches": int((pos.diff().abs() > 0).sum()),
+    }
 
 
 def main() -> None:
@@ -145,7 +180,6 @@ def main() -> None:
     rows = []
     fwd_map = {}
     for label in idx_close.columns:
-        r = idx_close[label].pct_change()
         fwd_map[(label, 5)] = (idx_close[label].shift(-5) / idx_close[label] - 1)
         fwd_map[(label, 20)] = (idx_close[label].shift(-20) / idx_close[label] - 1)
 
@@ -173,9 +207,68 @@ def main() -> None:
     res = pd.DataFrame(rows).set_index("indicator")
     out = ROOT / "research" / "sentiment_results.csv"
     res.to_csv(out, encoding="utf-8-sig")
-    print("=== 情绪/资金面指标 RankIC（vs 指数未来收益）===")
+    print("=== 1) 情绪/资金面指标 RankIC（vs 指数未来收益）===")
     print(res.round(4).to_string())
     print(f"\n已写出: {out}")
+
+    # ---- 2) 分位组合：扩张窗口五分位 → 未来 20 日指数收益（检验单调性）----
+    quint_rows = []
+    for iname, ind in indicators.items():
+        if ind is None or ind.notna().sum() < 400:
+            continue
+        for label in idx_close.columns:
+            qret = quintile_returns(ind, fwd_map[(label, 20)])
+            if qret.empty:
+                continue
+            row: dict[str, object] = {"indicator": iname, "index": label}
+            for k, v in qret.items():
+                row[f"q{int(k)}"] = v
+            row["q5_minus_q1"] = float(qret.get(5, np.nan) - qret.get(1, np.nan))
+            quint_rows.append(row)
+    quint = pd.DataFrame(quint_rows)
+    if not quint.empty:
+        quint = quint.set_index(["indicator", "index"])
+        qout = ROOT / "research" / "sentiment_quintile.csv"
+        quint.to_csv(qout, encoding="utf-8-sig")
+        print("\n=== 2) 扩张窗口五分位 → 未来 20 日指数收益（%，检验单调性）===")
+        print((quint * 100).round(2).to_string())
+
+    # ---- 3) 择时叠加：信号>0 满仓 / 否则空仓（含 20 日均线平滑版）----
+    timing_rows = []
+    for iname, ind in indicators.items():
+        if ind is None or ind.notna().sum() < 400:
+            continue
+        for label in idx_close.columns:
+            rets = idx_close[label].pct_change()
+            for smooth, tag in ((None, "raw"), (20, "ma20")):
+                m = timing_backtest(ind, rets, smooth=smooth)
+                timing_rows.append(
+                    {
+                        "indicator": iname,
+                        "index": label,
+                        "variant": tag,
+                        "annual": m["annual"],
+                        "max_dd": m["max_dd"],
+                        "position_ratio": m["position_ratio"],
+                        "bh_annual": m["bh_annual"],
+                        "bh_max_dd": m["bh_max_dd"],
+                        "excess": m["annual"] - m["bh_annual"],
+                        "n_switches": m["n_switches"],
+                    }
+                )
+    timing = pd.DataFrame(timing_rows).set_index(["indicator", "index", "variant"])
+    tout = ROOT / "research" / "sentiment_timing.csv"
+    timing.to_csv(tout, encoding="utf-8-sig")
+    print("\n=== 3) 择时叠加（信号>0 满仓，含 0.05% 单边成本）vs 买入持有（%）===")
+    show = timing[["annual", "max_dd", "position_ratio", "bh_annual", "bh_max_dd", "excess"]].copy()
+    for c in ("annual", "max_dd", "position_ratio", "bh_annual", "bh_max_dd", "excess"):
+        show[c] = (show[c] * 100).round(2)
+    print(show.to_string())
+    print(f"\n已写出: {tout}")
+    print(
+        "\n判读：excess = 择时年化 − 买入持有年化。若各指标的最优 excess 不显著为正，"
+        "则总报告 #5『情绪/资金面择时有效』不成立（原结论缺产物支撑）。"
+    )
 
 
 if __name__ == "__main__":

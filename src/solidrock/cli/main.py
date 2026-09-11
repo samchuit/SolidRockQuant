@@ -873,6 +873,19 @@ def live_reconcile(
 
     console.print(Markdown(md))
 
+    if actions or untracked:
+        from solidrock.notify import notify_event
+
+        notify_event(
+            "live_reconcile_diff",
+            f"实盘对账发现差异：{len(actions)} 项待调仓、{len(untracked)} 项未跟踪持仓",
+            fields={
+                "actions": ", ".join(f"{a['action']} {a['symbol']} {a['qty']}" for a in actions) or "无",
+                "untracked": ", ".join(f"{i['symbol']} {i['qty']}" for i in untracked) or "无",
+            },
+            dedupe_key=f"{sorted((a['action'], a['symbol'], a['qty']) for a in actions)}",
+        )
+
     executable = [a for a in actions if a["action"] in ("buy", "sell") and a["qty"] > 0]
     if executable and yes:
         if not typer.confirm("以上差异将按建议动作向实盘提交真实订单，确认？"):

@@ -247,8 +247,12 @@ def run_loop(
 
     仅在交易日运行（对照本地交易日历）；每个时点每日最多执行一次；
     启动时已过的时点会立即补跑一次；Ctrl-C 退出。
+
+    **告警**：单阶段异常除写入 ``{root}/live/session_errors.log`` 外，还会经
+    :func:`~solidrock.notify.notify_event` 推送（同一 phase 的同类异常 60s 内去重），
+    避免"无人值守时静默失败"。
     """
-    from solidrock.notify import send_webhook
+    from solidrock.notify import notify_event, send_webhook
 
     triggers = sorted(trigger_times or ["14:50"])
     cal = TradingCalendar(session.store)
@@ -273,11 +277,24 @@ def run_loop(
                 summary = session.run_phase(phase, now, execute=execute)
                 if phase == "close" and notify:
                     n_orders = len(summary["orders"])
-                    send_webhook(f"[{session.cfg.name}] 盘后摘要：意图订单 {n_orders} 笔（详见 sessions 产物）")
+                    n_submitted = len(summary["submitted"])
+                    send_webhook(
+                        f"[{session.cfg.name}] 盘后摘要：意图订单 {n_orders} 笔，"
+                        f"已提交 {n_submitted} 笔（详见 sessions 产物）",
+                        title="live_session_close",
+                        dedupe_key=f"live_session_close|{today}",
+                    )
             except Exception as exc:  # 常驻模式单阶段失败不退出，记录后继续
                 error_log.parent.mkdir(parents=True, exist_ok=True)
                 with error_log.open("a", encoding="utf-8") as fh:
                     fh.write(f"{now.isoformat()} phase={phase} error={exc!r}\n")
+                if notify:
+                    notify_event(
+                        "live_session_error",
+                        f"[{session.cfg.name}] 阶段 {phase} 执行失败：{type(exc).__name__}",
+                        fields={"error": str(exc)[:300], "now": now.isoformat()},
+                        dedupe_key=f"{phase}|{type(exc).__name__}",
+                    )
         _sleep(20)
 
 

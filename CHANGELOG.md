@@ -5,6 +5,38 @@
 
 ## [Unreleased]
 
+### 修复（可观测性 / 可靠性）
+
+- **通知失败不再静默**：`notify.py` 原先 `except Exception: return False` 吞掉所有错误，
+  运维无法知道告警通道是否失效。现区分 `not_configured` / `invalid_url` / `send_failed`
+  三种原因，经 `last_failure()` 可读，并落盘 `{data_dir}/live/notify_errors.log`；
+  新增 `notify_event()` / `notify_lines()` 结构化事件接口与 `dedupe_key` 进程内去重
+  （默认 60s），避免同一问题刷屏。新增 `tests/test_notify.py`（覆盖率 0% → 完整覆盖）。
+- **告警接入关键事件**（此前仅 `session.py` 盘后一处）：下单成功、柜台拒绝、
+  **被安全闸门拦截**、撤单、对账差异（CLI 与 MCP 两条路径）、常驻会话阶段异常，
+  现均推送通知并在审计日志留痕。
+- **模拟盘熔断状态跨次运行持久化**：`EngineState.halted` 原为纯内存态，
+  `PaperState` 不保存，导致进程重启后单向熔断被"自动恢复"、继续开仓。
+  现 `PaperState` 持久化 `halted` / `halt_peak`，`BacktestEngine` 接受
+  `initial_halted` / `initial_halt_peak` 并在 `BacktestResult` 回传；
+  `PaperTrader.status()` 与运行摘要显式暴露熔断状态与说明。
+  新增回归测试 `test_halt_state_persists_across_runs`。
+
+### 新增（研究）
+
+- `research/shareholder_factor.py`：股东户数（筹码集中度）因子 IC 研究，含
+  **公告日前视诊断**。结论：因子真实但幅度被高估——公告日对齐（无前视）下
+  5 日 RankIC +0.0139（t=+11.67，11/11 年为正）、20 日 +0.0198（t=+16.46，10/11 年为正），
+  而原报声称 0.047；用「统计截止日」对齐引入约 11 天前视，单独就把 IC 抬到 0.0373（1.89x）。
+  分位 Q5-Q1 仅 +0.39%/20 日且中间不单调。
+- `research/sentiment_timing.py` 补齐 docstring 承诺的**分位组合**与**择时叠加**
+  （扩张窗口分位无前视、`shift(1)` 防前视、含 0.05% 单边成本），删除含占位符的
+  死代码 `rank_ic`。结论：回撤抑制有效（`med_ret_20` 回撤 -15.8% vs 买入持有 -55.1%），
+  但①`limit_up_n`/`up_ratio`/`new_high_20` 三个指标恒为正、择时退化为永远满仓（无增益）；
+  ②最强指标 `amount_z` 超额在 CSI1000 为 +9.91pp、HS300 仅 +0.62pp，**跨指数不稳健**；
+  ③报告描述的"北向Z+放量Z+反向拥挤"合成信号仍未实现。
+- `research/PROGRAM_REPORT.md` 的 #5/#8 两行判定与注记、遗留事项、复现索引已按上述结果更新。
+
 ### 修复（安全）
 
 - **实盘只读配置曾被硬编码绕过**：`agent/tools.py`（MCP `live_submit_order`/

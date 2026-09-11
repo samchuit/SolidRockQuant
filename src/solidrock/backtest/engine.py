@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -91,6 +92,8 @@ class BacktestResult:
     final_pending: list[dict] = None  # type: ignore[assignment]  # 未执行订单（carry_pending 模式）
     final_cash: float = 0.0
     final_factors: dict[str, float] = None  # type: ignore[assignment]  # 复权因子游标（模拟盘续用）
+    final_halted: bool = False  # 熔断状态（模拟盘续跑必须携带）
+    final_halt_peak: float | None = None  # 净值峰值（熔断判定的基准）
 
     def summary(self) -> dict:
         """关键指标摘要（供 CLI/MCP 打印）。"""
@@ -122,16 +125,25 @@ class BacktestEngine:
         initial_portfolio: Portfolio | None = None,
         initial_pending: list[Order] | None = None,
         initial_last_factors: dict[str, float] | None = None,
+        initial_halted: bool = False,
+        initial_halt_peak: float | None = None,
     ) -> None:
         """``initial_portfolio``/``initial_pending``/``initial_last_factors``：
         模拟盘增量运行时注入的持久化状态（见 backtest/paper.py）；
-        回测场景留空即可。"""
+        回测场景留空即可。
+
+        ``initial_halted``/``initial_halt_peak``：熔断状态与历史净值峰值。
+        模拟盘跨日续跑必须携带，否则每次重启都会重置熔断（``DrawdownHalt`` 是
+        单向熔断，重置等于自动恢复了不该恢复的状态），且回撤峰值从头算起。
+        """
         self.config = config
         self.store = store
         self._strategy = strategy
         self._initial_portfolio = initial_portfolio
         self._initial_pending = initial_pending
         self._initial_last_factors = initial_last_factors
+        self._initial_halted = initial_halted
+        self._initial_halt_peak = initial_halt_peak
 
     # ------------------------------------------------------------------ 入口
     def run(self) -> BacktestResult:
@@ -189,6 +201,7 @@ class BacktestEngine:
             portfolio = Portfolio(initial_cash=cfg.initial_cash, cash=cfg.initial_cash)
         state = EngineState(dates=[], panel={}, params=strategy.params, portfolio=portfolio)
         state.pending = list(self._initial_pending or [])
+        state.halted = bool(self._initial_halted)  # 续跑时保持熔断（策略单继续被拒）
         ctx = Context(state)
         state.now = start_ts
         strategy.setup(ctx)
@@ -269,6 +282,10 @@ class BacktestEngine:
         )
         weight_cap = PositionWeightCap(cfg.max_position_weight) if cfg.max_position_weight else None
         halt = DrawdownHalt(cfg.drawdown_halt) if cfg.drawdown_halt else None
+        if halt is not None and self._initial_halt_peak is not None:
+            # 续跑：沿用历史峰值与已触发状态（单向熔断不得因重启而复位）
+            halt.peak = float(self._initial_halt_peak)
+            halt.halted = self._initial_halted
 
         nav_rows: list[dict] = []
         last_factor: dict[str, float] = dict(self._initial_last_factors or {})
@@ -427,6 +444,8 @@ class BacktestEngine:
             ),
             final_cash=portfolio.cash,
             final_factors=dict(last_factor),
+            final_halted=bool(state.halted),
+            final_halt_peak=float(halt.peak) if halt is not None and halt.peak != -math.inf else None,
         )
         if cfg.log_experiment:
             self._log_experiment(result)
