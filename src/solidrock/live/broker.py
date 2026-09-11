@@ -8,6 +8,8 @@ cfquant 提供与 ``xtquant`` 兼容的本地 API（见其 docs/ai-skill），�
   （FIX_PRICE）；数量自动按整手校验（买入 100 股倍数，卖出允许零股清仓）；
 - **只读守卫**：默认 ``read_only=True``（配置 ``SOLIDROCK_LIVE_READ_ONLY``），
   下单/撤单直接拒绝；实盘下单需要显式关闭只读并二次确认；
+- **下单守卫**：``submit_order`` 无条件经过 :class:`~solidrock.live.guards.LiveOrderGuard`
+  （白名单 / 单笔金额上限 / 交易时段 / 幂等去重），调用方无法通过传参跳过；
 - **审计**：每笔下单/撤单追加写入 ``{data_dir}/live/audit.jsonl``。
 
 依赖：``cfquant``（D:\cfquant 源码安装或 pip install cfquant）。未安装时抛
@@ -19,10 +21,15 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from solidrock.agent.errors import ErrorCode, err
+from solidrock.agent.errors import ErrorCode, SolidRockError, err
 from solidrock.config import get_settings
+from solidrock.live.guards import LiveOrderGuard
+from solidrock.notify import notify_event
+
+if TYPE_CHECKING:
+    from solidrock.config import Settings
 
 
 def _import_cfquant() -> dict[str, Any]:
@@ -52,8 +59,15 @@ class CfquantBroker:
         account_type: str | None = None,
         read_only: bool | None = None,
         data_dir: str | Path | None = None,
+        settings: Settings | None = None,
+        guard: LiveOrderGuard | None = None,
     ) -> None:
-        settings = get_settings()
+        """``read_only=None`` 表示继承全局配置（``SOLIDROCK_LIVE_READ_ONLY``）。
+
+        ``guard`` 仅供测试注入；缺省时按配置构建（见 :mod:`solidrock.live.guards`）。
+        """
+        settings = settings or get_settings()
+        self._settings = settings
         self.account_id = account_id or settings.live_account_id
         self.account_type = account_type or settings.live_account_type
         self.read_only = settings.live_read_only if read_only is None else read_only
@@ -64,6 +78,7 @@ class CfquantBroker:
                 hint="设置环境变量 SOLIDROCK_LIVE_ACCOUNT_ID=<资金账号>（写入 .env 即可，不入 git）",
             )
         self.data_dir = Path(data_dir) if data_dir else settings.resolved_data_dir()
+        self._order_guard = guard
         self._cf: Any = None
         self._account: Any = None
         self._trader: Any = None
@@ -86,6 +101,20 @@ class CfquantBroker:
                 "实盘通道处于只读模式，禁止下单/撤单",
                 hint="确认风险后设置环境变量 SOLIDROCK_LIVE_READ_ONLY=false（或 CLI --no-read-only）",
             )
+
+    def _guard(self) -> LiveOrderGuard:
+        """下单守卫（惰性构建；交易日历可用时一并注入）."""
+        if self._order_guard is None:
+            calendar = None
+            try:
+                from solidrock.data.calendar import TradingCalendar
+                from solidrock.data.store import DataStore
+
+                calendar = TradingCalendar(DataStore(self.data_dir))
+            except Exception:  # 无日历/无数据目录时守卫退化为工作日判断
+                calendar = None
+            self._order_guard = LiveOrderGuard(settings=self._settings, data_dir=self.data_dir, calendar=calendar)
+        return self._order_guard
 
     # ------------------------------------------------------------------ 查询
     def query_asset(self) -> dict[str, Any]:
@@ -129,9 +158,12 @@ class CfquantBroker:
         - ``qty``：股数（买入自动校验 100 股整手；卖出允许零股清仓）；
         - ``price``：None → 对手方最新价（LATEST_PRICE）；给定 → 限价（FIX_PRICE）。
 
+        顺序：只读闸门 → 参数校验 → **下单守卫**（白名单/金额上限/交易时段/幂等）
+        → 连接 QMT → 委托。全部本地校验先于连接，因此被拒的订单**不会**触碰
+        QMT（也不要求桥接在线）。
+
         返回 ``{"order_id": ..., "echo": {...下单回执字段...}}``，并写入审计日志。
         """
-        self._connect()
         self._ensure_writable()
         if side not in ("buy", "sell"):
             raise err(ErrorCode.PARAM_INVALID, f"side 应为 buy/sell，收到 {side!r}")
@@ -144,10 +176,34 @@ class CfquantBroker:
                 f"买入数量必须为 100 股整手，收到 {qty}",
                 hint="卖出（含清仓零股）不受整手限制",
             )
-        xtconstant = self._cf["xtconstant"]
-        order_type = xtconstant.STOCK_BUY if side == "buy" else xtconstant.STOCK_SELL
         if price is not None and price <= 0:
             raise err(ErrorCode.PARAM_INVALID, f"限价必须为正，收到 {price}")
+        # 安全闸门：白名单 / 单笔金额上限 / 交易时段 / 幂等去重（不可跳过）
+        try:
+            guard_ctx = self._guard().check(symbol, side, qty, price=price)
+        except SolidRockError as exc:
+            # 被守卫拦下的下单是一次"越界尝试"，属于运维必须知道的事件
+            notify_event(
+                "live_order_blocked",
+                f"实盘下单被安全闸门拦截：{symbol} {side} {qty}",
+                fields={"code": exc.code.value, "reason": exc.message},
+                dedupe_key=f"{exc.code.value}|{symbol}|{side}|{qty}",
+            )
+            self._audit(
+                {
+                    "action": "submit_order_blocked",
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                    "price": price,
+                    "code": exc.code.value,
+                    "message": exc.message,
+                }
+            )
+            raise
+        self._connect()
+        xtconstant = self._cf["xtconstant"]
+        order_type = xtconstant.STOCK_BUY if side == "buy" else xtconstant.STOCK_SELL
         price_type = xtconstant.FIX_PRICE if price is not None else xtconstant.LATEST_PRICE
         final_price = price if price is not None else 0.0
         remark = f"solidrock {order_remark}".strip()
@@ -166,6 +222,8 @@ class CfquantBroker:
             "order_id": order_id,
             "accepted": order_id is not None and order_id != -1,
         }
+        # 台账先落盘（幂等依据），再判定成败；被拒的委托同样占用指纹，避免重试风暴
+        self._guard().record(symbol, side, qty, price=price)
         self._audit(
             {
                 "action": "submit_order",
@@ -177,22 +235,39 @@ class CfquantBroker:
                 "order_id": order_id,
                 "strategy_name": strategy_name,
                 "remark": remark,
+                "guard": guard_ctx,
             }
         )
         if not receipt["accepted"]:
+            notify_event(
+                "live_order_rejected",
+                f"实盘下单被柜台拒绝：{symbol} {side} {qty}",
+                fields={"order_id": order_id, "price": price},
+            )
             raise err(
                 ErrorCode.LIVE_ORDER_FAILED,
                 f"实盘下单被拒绝：order_id={order_id}",
                 hint="检查资金/持仓是否充足、价格是否越界；cfquant Web 控制台可查委托详情",
             )
+        notify_event(
+            "live_order_submitted",
+            f"实盘委托已提交：{symbol} {side} {qty}",
+            fields={
+                "order_id": order_id,
+                "price": price if price is not None else "市价",
+                "notional": guard_ctx.get("notional"),
+                "strategy": strategy_name,
+            },
+        )
         return receipt
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
-        """撤销委托。"""
-        self._connect()
+        """撤销委托（撤单降低风险，不受交易时段限制；仍受只读闸门约束）."""
         self._ensure_writable()
+        self._connect()
         result = self._trader.cancel_order_stock(self._account, order_id)
         self._audit({"action": "cancel_order", "order_id": order_id, "result": result})
+        notify_event("live_order_cancelled", f"实盘撤单已提交：{order_id}", fields={"result": result})
         out: dict[str, Any] = {"order_id": order_id, "cancel_result": result}
         return out
 

@@ -271,8 +271,8 @@ def build_server() -> Any:
     def live_status() -> str:
         """查询 QMT 实盘账户资金与持仓（只读，需 cfquant 桥接在线）。
 
-        返回资金明细与全部持仓。实盘工具默认只读；下单需配置
-        SOLIDROCK_LIVE_READ_ONLY=false 并与用户二次确认。
+        返回资金明细与全部持仓。查询工具始终只读；下单另见 live_submit_order，
+        其默认被 SOLIDROCK_LIVE_READ_ONLY 拒绝（配置默认 true）。
         """
         return t.tool_live_status()
 
@@ -293,12 +293,17 @@ def build_server() -> Any:
         qty: int,
         price: float | None = None,
         strategy_name: str = "solidrock-agent",
+        confirm: bool = False,
     ) -> str:
-        """向 QMT 提交实盘订单（真实资金！只读模式下会返回 LIVE_READ_ONLY 错误）.
+        """向 QMT 提交实盘订单（真实资金！）.
 
         symbol 为统一符号（如 000001.SZ）；side: buy/sell；qty: 股数（买入须
-        100 股整手）；price: None=最新价市价，给定则为限价。**调用前必须与
-        用户就标的/方向/数量完成二次确认**；下单自动写入审计日志。
+        100 股整手）；price: None=最新价市价，给定则为限价。
+
+        **必须先向用户复述标的/方向/数量/价格并取得同意，再以 confirm=true 调用**；
+        未传 confirm=true 一律拒绝，这是代码层闸门而非提示词约定。下单还受强制
+        守卫约束（只读配置、标的白名单、单笔金额上限、交易时段、幂等去重），
+        任一不满足都会返回对应错误码，委托不会发出。审计日志自动记录。
         """
         return t.tool_live_submit_order(
             symbol=symbol,
@@ -306,6 +311,7 @@ def build_server() -> Any:
             qty=qty,
             price=price,
             strategy_name=strategy_name,
+            confirm=confirm,
         )
 
     @mcp.tool()
@@ -317,13 +323,21 @@ def build_server() -> Any:
     def live_reconcile(
         paper_name: str | None = None,
         target: dict[str, int] | None = None,
+        liquidate_untracked: bool = False,
     ) -> str:
         """实盘对账：对比 QMT 实际持仓与目标持仓，只输出差异与建议，不下单.
 
         paper_name：对比指定模拟盘的持仓；target：手工指定目标，如
         {"510300.SH": 1000}。二者选一。
+
+        liquidate_untracked 默认 false：实盘持有但目标未包含的标的不会被建议
+        清仓，而是列在 untracked 中待人工确认（避免误清实盘其他持仓）。
         """
-        return t.tool_live_reconcile(paper_name=paper_name, target=target)
+        return t.tool_live_reconcile(
+            paper_name=paper_name,
+            target=target,
+            liquidate_untracked=liquidate_untracked,
+        )
 
     @mcp.tool()
     def run_ml_walk_forward(

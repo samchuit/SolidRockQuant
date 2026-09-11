@@ -55,6 +55,10 @@ class ErrorCode(str, Enum):
     LIVE_UNAVAILABLE = "LIVE_UNAVAILABLE"  # 实盘通道不可用（cfquant 未安装/QMT 离线）
     LIVE_ORDER_FAILED = "LIVE_ORDER_FAILED"  # 实盘下单/撤单被拒绝
     LIVE_READ_ONLY = "LIVE_READ_ONLY"  # 实盘通道配置为只读，禁止下单
+    LIVE_SYMBOL_NOT_ALLOWED = "LIVE_SYMBOL_NOT_ALLOWED"  # 标的不在实盘白名单内
+    LIVE_ORDER_TOO_LARGE = "LIVE_ORDER_TOO_LARGE"  # 单笔名义金额超过上限
+    LIVE_NOT_TRADING_HOURS = "LIVE_NOT_TRADING_HOURS"  # 非交易日或非交易时段
+    LIVE_DUPLICATE_ORDER = "LIVE_DUPLICATE_ORDER"  # 幂等去重命中（疑似重复提交）
 
 
 class SolidRockError(Exception):

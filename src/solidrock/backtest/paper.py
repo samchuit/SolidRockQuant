@@ -55,6 +55,9 @@ class PaperState:
     created_at: str
     updated_at: str
     multipliers: dict[str, float] = field(default_factory=dict)
+    # 熔断状态（单向熔断必须跨次运行保持，否则重启即"自动恢复"）
+    halted: bool = False
+    halt_peak: float | None = None
 
 
 class PaperTrader:
@@ -115,6 +118,8 @@ class PaperTrader:
             initial_portfolio=portfolio,
             initial_pending=pending,
             initial_last_factors=last_factors,
+            initial_halted=state.halted,
+            initial_halt_peak=state.halt_peak,
         )
         result = engine.run()
 
@@ -144,6 +149,14 @@ class PaperTrader:
             "run_count": state.run_count,
             "created_at": state.created_at,
             "updated_at": state.updated_at,
+            "halted": state.halted,
+            "halt_peak": state.halt_peak,
+            "note": (
+                "⚠ 熔断已触发（单向，不自动恢复）：策略订单持续被拒，持仓已清。"
+                "确认可恢复后需人工重置——删除 state.json 中的 halted 或换 name 重建模拟盘。"
+                if state.halted
+                else None
+            ),
         }
 
     # ------------------------------------------------------------------ 内部
@@ -190,6 +203,8 @@ class PaperTrader:
             created_at=raw["created_at"],
             updated_at=raw["updated_at"],
             multipliers=raw.get("multipliers", {}),
+            halted=bool(raw.get("halted", False)),
+            halt_peak=raw.get("halt_peak"),
         )
 
     def _save_state(self, state: PaperState, result, cfg: BacktestConfig) -> None:
@@ -200,6 +215,8 @@ class PaperTrader:
         state.multipliers = (
             dict(result.final_multipliers) if hasattr(result, "final_multipliers") else state.multipliers
         )
+        state.halted = bool(getattr(result, "final_halted", False))
+        state.halt_peak = getattr(result, "final_halt_peak", None)
         if result.nav is not None and not result.nav.empty:
             state.last_date = str(result.nav.index[-1].date())
         state.run_count += 1
@@ -273,7 +290,13 @@ class PaperTrader:
             "pending_orders": state.pending,
             "metrics": result.metrics,
             "trades": result.trades.to_dict("records") if not result.trades.empty else [],
-            "note": "模拟盘每日运行一次；净值与持仓见 " + str(self.state_dir),
+            "halted": state.halted,
+            "rejections": result.rejections["code"].value_counts().to_dict() if not result.rejections.empty else {},
+            "note": (
+                "⚠ 熔断已触发：本次及后续运行都不会再开新仓（单向熔断）"
+                if state.halted
+                else "模拟盘每日运行一次；净值与持仓见 " + str(self.state_dir)
+            ),
         }
 
     def _append_history(self, summary: dict[str, Any]) -> None:

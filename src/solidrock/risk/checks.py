@@ -18,13 +18,24 @@ class PositionWeightCap:
             raise ValueError(f"max_weight 应在 (0, 1]，收到 {max_weight}")
         self.max_weight = max_weight
 
-    def cap_qty(self, symbol: str, qty: float, ref_price: float, total_value: float) -> float:
-        """返回封顶后的买入股数（不整手，整手由撮合层处理）。"""
+    def cap_qty(
+        self,
+        symbol: str,
+        qty: float,
+        ref_price: float,
+        total_value: float,
+        current_value: float = 0.0,
+    ) -> float:
+        """返回封顶后的买入股数（不整手，整手由撮合层处理）.
+
+        ``current_value``：该标的**已有持仓市值**（持股数 × 参考价）。必须传入，
+        否则反复加仓时每笔都能再买满 ``max_weight``，单标的权重上限形同虚设。
+        """
         if qty <= 0 or total_value <= 0 or ref_price <= 0:
             return qty
         max_value = self.max_weight * total_value
-        current_value = 0.0
-        return min(qty, max(0.0, (max_value - current_value) / ref_price))
+        room = max(0.0, max_value - max(current_value, 0.0))
+        return min(qty, room / ref_price)
 
     def is_breached(self, weight: float) -> bool:
         return weight > self.max_weight + 1e-9

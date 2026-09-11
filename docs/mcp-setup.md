@@ -57,10 +57,32 @@ srq mcp serve                # stdio 模式，接入真实客户端
 | `run_paper_session` / `paper_status` | 模拟盘：状态持久化的日频跟踪 |
 | `run_factor_analysis` | 因子分析（RankIC + 分层） |
 | `run_vectorized_backtest` | 向量化因子筛选（快速净值） |
+| `run_ml_walk_forward` | ML 因子合成 walk-forward（样本外） |
 | `list_experiments` / `get_experiment` / `compare_experiments` | 实验追踪查询与对比 |
-| `live_status` / `live_orders` / `live_trades` | QMT 实盘查询（资金/持仓/委托/成交） |
-| `live_submit_order` / `live_cancel_order` | 实盘下单/撤单（默认只读模式拒绝） |
-| `live_reconcile` | 实盘对账（实际 vs 目标持仓差异） |
+| `live_status` / `live_orders` / `live_trades` | QMT 实盘查询（资金/持仓/委托/成交，始终只读） |
+| `live_submit_order` | 实盘下单 —— **须 `confirm=true`**，且受只读配置 + 下单守卫约束（见下） |
+| `live_cancel_order` | 实盘撤单（降低风险的操作，不受交易时段限制） |
+| `live_reconcile` | 实盘对账（实际 vs 目标持仓差异；默认不自动清仓未跟踪持仓） |
+
+共 23 个工具。
+
+## 实盘下单的安全闸门（代码层强制）
+
+`live_submit_order` 是唯一会动用真实资金的工具，它必须**同时**通过以下检查；
+任一条不满足都会返回对应错误码，委托不会发出（这些检查位于 `CfquantBroker.submit_order` 内，
+调用方无法通过传参跳过）：
+
+| 闸门 | 配置 | 默认 | 拒绝码 |
+|------|------|------|--------|
+| 显式确认 | 工具参数 `confirm=true` | 必须显式传入 | `PARAM_INVALID` |
+| 只读模式 | `SOLIDROCK_LIVE_READ_ONLY` | `true`（拒绝下单） | `LIVE_READ_ONLY` |
+| 标的准入 | `SOLIDROCK_LIVE_SYMBOL_WHITELIST` | 空（不限制） | `LIVE_SYMBOL_NOT_ALLOWED` |
+| 单笔金额上限 | `SOLIDROCK_LIVE_MAX_ORDER_NOTIONAL` | 500000 元 | `LIVE_ORDER_TOO_LARGE` |
+| 交易时段 | `SOLIDROCK_LIVE_ENFORCE_TRADING_HOURS` | `true`（09:15-11:30 / 13:00-15:05） | `LIVE_NOT_TRADING_HOURS` |
+| 幂等去重 | `SOLIDROCK_LIVE_DUPLICATE_WINDOW_SECONDS` | 60 秒 | `LIVE_DUPLICATE_ORDER` |
+
+即：**只读是默认状态，要真实下单必须显式把 `SOLIDROCK_LIVE_READ_ONLY` 设为 `false`
+且调用方传 `confirm=true`**。所有下单/撤单都会写入 `{data_dir}/live/audit.jsonl`（含守卫判定结果）。
 
 ## 返回信封
 

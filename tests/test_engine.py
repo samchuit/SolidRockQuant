@@ -144,6 +144,28 @@ class TestRisk:
         weight = trade["qty"] * trade["price"] / 1_000_000.0
         assert weight <= 0.5 + 1e-9
 
+    def test_weight_cap_not_bypassed_by_repeated_adds(self, mkt) -> None:
+        """回归：权重上限必须计入已有持仓，否则每天都能再买满一次上限.
+
+        修复前 ``cap_qty`` 把 ``current_value`` 硬编码为 0，于是"每日都买到 100%"
+        的策略每天都能再加满 50% NAV，实际权重逐日累加到远超上限。
+        """
+
+        class AlwaysBuy(Strategy):
+            def setup(self, ctx) -> None:  # type: ignore[no-untyped-def]
+                ctx.universe = [SYM]
+
+            def on_signal(self, ctx) -> None:  # type: ignore[no-untyped-def]
+                ctx.order_target_percent(SYM, 1.0)
+
+        result = BacktestEngine(AlwaysBuy, config(mkt, max_position_weight=0.5), mkt).run()
+        buys = result.trades[result.trades["side"] == "buy"]
+        # 触及上限后不应再有成交（而非每天新增一笔 50% NAV 的买单）
+        assert len(buys) == 1
+        assert buys.iloc[0]["qty"] == pytest.approx(50_000.0)
+        # 后续每日的加仓信号都应被上限拒掉（说明限额确实在持续生效）
+        assert "WEIGHT_CAP" in set(result.rejections["code"])
+
     def test_drawdown_halt(self, tmp_path: Path) -> None:
         """持续下跌触发熔断：清仓 + 后续策略订单被拒。"""
         mkt = make_market_store(tmp_path, symbols=(SYM,), days=12, base=20.0, drift=-1.0)
