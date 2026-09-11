@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     live_account_type: str = "STOCK"  # STOCK / CREDIT / FUTURE 等
     live_read_only: bool = True  # 只读模式：True 时禁止下单/撤单（安全默认，实盘下单显式关闭）
 
+    # --- 实盘下单守卫（Guard，见 live/guards.py；在 broker 内强制执行，不可绕过） ---
+    # 单笔最大名义金额（元）。0 或负数 = 关闭该检查。
+    live_max_order_notional: float = 500_000.0
+    # 允许交易的标的（逗号分隔，如 "510300.SH,000001.SZ"）。空 = 不限制。
+    live_symbol_whitelist: str | None = None
+    # 非交易日/非交易时段是否拒绝下单（强烈建议保持 True）。
+    live_enforce_trading_hours: bool = True
+    # 相同指纹（标的方向数量价格）在此秒数内的重复提交视为重复委托并拒绝。0 = 关闭。
+    live_duplicate_window_seconds: int = 60
+
     # --- 通知 ---
     notify_webhook: str | None = None  # SOLIDROCK_NOTIFY_WEBHOOK（钉钉/企微/通用）
     notify_type: str = "generic"  # dingtalk / wecom / generic

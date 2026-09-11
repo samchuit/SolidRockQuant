@@ -25,7 +25,7 @@ SolidRockQuant 从第一天起就为 LLM Agent 设计：**MCP Server 是一等�
 ## 核心特性
 
 ### 🤖 Agent 原生
-- **MCP Server**（`srq mcp serve`）：数据获取、回测、因子分析、实验查询共 13 个工具，Claude 等 LLM 客户端即插即用
+- **MCP Server**（`srq mcp serve`）：数据获取、回测、因子分析、实验查询、模拟盘与实盘共 23 个工具，Claude 等 LLM 客户端即插即用
 - **结构化输出**：统一 JSON 信封 + Markdown 报告；错误码稳定且必带可执行的修复 hint
 - **前视偏差检测**：`shift(-n)`、`bfill`、幻觉 API 等 LLM 常见错误的 AST 静态检查，回测前自动拦截
 - **确定性可复现**：无随机性引擎 + 数据版本快照，同一实验永远得到同一结果
@@ -106,19 +106,27 @@ srq data snapshot create snap-20260908    # 数据版本快照（实验复现）
 }
 ```
 
-Claude 等 Agent 即可获得 22 个工具（含实盘查询与下单），研究闭环无需人工干预。详细配置见 [docs/mcp-setup.md](docs/mcp-setup.md)，Agent 操作指南见 `src/solidrock/agent/skills/`。
+Claude 等 Agent 即可获得 23 个工具（含模拟盘与实盘查询/下单），研究闭环无需人工干预。详细配置见 [docs/mcp-setup.md](docs/mcp-setup.md)，Agent 操作指南见 `src/solidrock/agent/skills/`。
+
+> **实盘安全默认**：`SOLIDROCK_LIVE_READ_ONLY` 默认为 **true**，只读时任何下单/撤单都会被拒绝；
+> MCP 的 `live_submit_order` 还需显式传 `confirm=true`。此外下单统一经过**下单守卫**
+> （标的白名单 / 单笔金额上限 / 交易时段 / 幂等去重，见 `SOLIDROCK_LIVE_*` 配置），
+> 这些闸门在 `CfquantBroker.submit_order` 内强制执行，调用方无法通过传参跳过。
 
 ## 项目结构
 
 ```
 src/solidrock/
 ├── data/          # 数据层：数据源适配器（可插拔）、本地仓库、交易日历、符号规范
-├── backtest/      # 回测引擎：事件驱动、撮合（A股规则）、组合核算、费用模型
+├── backtest/      # 回测引擎：事件驱动、撮合（A股规则）、组合核算、费用模型、模拟盘
 ├── strategy/      # Strategy 基类与加载器
-├── factors/       # 因子研究：基类、截面处理、RankIC/分层分析
-├── report/        # 绩效指标、Markdown/JSON 报告
+├── factors/       # 因子研究：基类、截面处理、RankIC/分层分析、内置因子
+├── ml/            # ML 管道：数据集构建、walk-forward、模型封装
+├── portfolio/     # 组合优化
+├── report/        # 绩效指标、Markdown/JSON/HTML 报告
 ├── experiments/   # SQLite 实验追踪
 ├── risk/          # 仓位上限、回撤熔断
+├── live/          # 实盘：QMT/cfquant 桥接、下单守卫、对账、策略驱动会话
 ├── agent/         # MCP Server、错误规范、策略校验、SKILL.md
 ├── cli/           # srq 命令行
 └── utils/         # 通用工具
@@ -143,9 +151,15 @@ src/solidrock/
 | 版本 | 内容 | 状态 |
 |------|------|------|
 | v0.1 | 数据层（日线）+ 事件回测（股票）+ 绩效报告 + 实验追踪 + MCP Server | **完成** |
-| v0.2 | 因子分析 ✅ · 期货回测（保证金/双向持仓/换月）· 分钟线 · 数据体检 | 进行中 |
-| v0.3 | 模拟盘、期货 CTP 实盘、策略沙箱校验、多 Agent 工作流示例 | 规划中 |
-| v0.4 | 插件注册机制、英语文档、更多数据源 | 规划中 |
+| v0.2 | 因子分析 · 期货回测（保证金/双向持仓/换月）· 分钟线 · 数据体检 | **完成** |
+| v0.3 | 模拟盘、策略沙箱校验、多 Agent 工作流示例 | **完成** |
+| v0.4 | 插件注册机制（`plugins/` workspace）、英语文档 | **完成** |
+| v0.5 | 分钟线回测、海外标的符号、官方 yfinance 插件 | **完成** |
+| v0.6 | ML 管道、组合优化、通知、股票实盘（QMT / cfquant 桥接） | **完成** |
+| v0.7 | 指标库、内置因子、HTML 报告、盘前盘后钩子、T+0 撮合、TDX 数据源、实盘下单守卫 | **进行中**（见 CHANGELOG `[Unreleased]`） |
+| v0.8 | 期货 CTP 实盘、更多数据源、Agent 多轮研究编排 | 规划中 |
+
+> 已发布版本与详细变更见 [CHANGELOG.md](CHANGELOG.md)（当前 `pyproject.toml` 版本号以其中 `[Unreleased]` 之上的一条为准）。
 
 ## 参与贡献
 

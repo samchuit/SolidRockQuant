@@ -84,10 +84,11 @@ class TestMetrics:
 
     def test_alpha_beta(self) -> None:
         rb = [0.01, 0.02, -0.01, 0.03, 0.005, -0.02, 0.015, 0.01]
-        bench = pd.Series(100.0 * pd.Series([1.0] + [1.0 + r for r in rb]).cumprod().values,
-                          index=pd.bdate_range("2024-01-02", periods=len(rb) + 1))
-        nav = pd.Series(100.0 * pd.Series([1.0] + [1.0 + 1.5 * r for r in rb]).cumprod().values,
-                        index=bench.index)
+        bench = pd.Series(
+            100.0 * pd.Series([1.0] + [1.0 + r for r in rb]).cumprod().values,
+            index=pd.bdate_range("2024-01-02", periods=len(rb) + 1),
+        )
+        nav = pd.Series(100.0 * pd.Series([1.0] + [1.0 + 1.5 * r for r in rb]).cumprod().values, index=bench.index)
         m = compute_metrics(nav, bench)
         assert m["beta"] == pytest.approx(1.5, rel=1e-6)
         # 策略日收益恰为 1.5 倍基准 → Jensen's alpha 恒为 0

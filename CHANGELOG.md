@@ -5,6 +5,74 @@
 
 ## [Unreleased]
 
+### 修复（安全）
+
+- **实盘只读配置曾被硬编码绕过**：`agent/tools.py`（MCP `live_submit_order`/
+  `live_cancel_order`）与 `cli/main.py`（`live order`/`live cancel`/`live reconcile`
+  /`live session`）在下单时硬编码 `read_only=False`，导致 `SOLIDROCK_LIVE_READ_ONLY=true`
+  **对任何真实下单路径都没有约束力**——与 `docs/mcp-setup.md`、`README`、`llms.txt`
+  的承诺相反。现改为继承全局配置（`read_only=None` → 读 `SOLIDROCK_LIVE_READ_ONLY`），
+  CLI 的 `--read-only/--no-read-only` 死参数已真正生效；`live session --execute`
+  在只读时提前报错而非跑空。测试从"只测 broker 类"改为**直接打工具调用层**
+  （`tests/test_mcp_tools.py::TestLiveToolSafety`），避免再次出现"配置失效却测试全绿"。
+- **新增实盘下单守卫 `live/guards.py`（`LiveOrderGuard`）**：在
+  `CfquantBroker.submit_order` 内**无条件**执行，调用方无法通过传参跳过。四道闸门：
+  标的白名单（`SOLIDROCK_LIVE_SYMBOL_WHITELIST`）、单笔金额上限
+  （`SOLIDROCK_LIVE_MAX_ORDER_NOTIONAL`，默认 50 万）、交易时段
+  （`SOLIDROCK_LIVE_ENFORCE_TRADING_HOURS`，默认开，09:15-11:30 / 13:00-15:05）、
+  幂等去重（`SOLIDROCK_LIVE_DUPLICATE_WINDOW_SECONDS`，默认 60s，防 LLM 重试重复下单）。
+  新错误码：`LIVE_SYMBOL_NOT_ALLOWED` / `LIVE_ORDER_TOO_LARGE` /
+  `LIVE_NOT_TRADING_HOURS` / `LIVE_DUPLICATE_ORDER`。
+- **MCP `live_submit_order` 新增 `confirm` 参数**：未显式传 `confirm=true` 一律拒绝
+  （代码层闸门，此前仅靠提示词约定）。撤单不受时段限制（降低风险的动作）。
+- **下单路径本地校验前置**：只读/参数/守卫检查全部先于 `_connect()`，因此被拒的订单
+  **不会触碰 QMT**，也不需要桥接在线。
+- **对账口径与清仓保护**：`live/reconcile.py` 此前用 `can_use_volume`（可卖量）当
+  **实际持仓**对比，A 股 T+1 下会把"已持有"误报为"缺仓"，配合 `--yes`
+  会**重复买入**。现改为：对比用 `volume`（总持仓）、卖出受可卖量约束
+  （T+1 锁定部分不卖并附 note）、新增 `hold` 动作；新增 `untracked_positions()`，
+  目标未包含的实盘持仓**默认不自动清仓**（`liquidate_untracked=False`）。
+- **回测单标的权重上限未计入已有持仓**：`risk/checks.py:cap_qty` 把 `current_value`
+  硬编码为 `0.0`，导致反复加仓时每笔都能再买满 `max_weight`——**95% 上限可被突破到
+  接近 100%**。现接受 `current_value` 由引擎传入（已持仓市值），并补回归测试
+  `test_weight_cap_not_bypassed_by_repeated_adds`。
+
+### 修复（数据正确性）
+
+- **TDX 数据源补测试**：`data/sources/tdx_source.py`（379 行，此前**零测试**）新增
+  `tests/test_tdx_source.py`（21 个用例），重点覆盖白盒 xdxr **复权因子重建链路**
+  （现金分红、送股、扩缩股、多次事件连乘、无操作事件忽略、越界比值拒绝、xdxr 失败降级），
+  以及翻页提前收手、指数走 `get_index_bars`、分钟线 category 映射、服务器故障转移。
+  覆盖率 15% → 85%。
+
+### 修复（研究报告口径）
+
+- `research/grid_research.py` 用**未复权价**跑网格：512100 在 2022-09-05 份额合并
+  （原始价 0.982→2.713）造成的非经济性跳变被当作连续行情，在虚高价卖出导致收益虚增。
+  改用 `adjust="hfq"` 后，step8%/U10 由 8.63%/-15.9% 修正为 **3.46%/-19.8%**
+  （同窗口买入持有 13.09% → 2.17%）。
+- `research/pit_reeval.py` 的"PIT 无偏宇宙"从未生效：`pit_universe()` 只被从未调用的
+  `run_pit` 引用，产出 CSV 的 `pit_weights` 实际用的是 2799 只全历史成分并集。
+  改为逐期取当期成分后：等权 **+4.22% → +0.66%**、REV20 **+2.98% → +1.42%**
+  （即"等权化结构性收益"从宣称的 +13.9pp 收缩到约 +0.7pp）。
+- `research/ml_synth.py` 用"当前 1000 只成分"训练/回测（幸存者偏差）：宇宙改为历史成分
+  并集（2798 只，含退市股）、逐期 PIT 掩码（平均 1000 只/期）、移除依赖总市值的
+  EP/SIZE 特征（市值仅覆盖当前成分）。ML Top-100 由 23.5% 修正为 **2.23%**，
+  同口径 PIT 等权基线 5.72% —— **选股超额为负**，原"最高收益"结论推翻。
+- 新增 `research/pit_universe.py`（PIT 成分掩码共用工具）；`portfolio_backtest.load_panels`
+  与 `fund_factor_research.load_bars_panel/build_factor_panels` 支持传入自定义宇宙。
+- 研究报告（`research/PROGRAM_REPORT.md`、`research/csi1000/REPORT.md`、
+  `REPORT_stocks.md`）已按上述修正结果更新并标注不可复现的数字。
+
+### 文档
+
+- MCP 工具数统一为 **23**（README 此前一处写 13、一处写 22，实际 23）；
+- README 路线图补齐至 v0.8（原表停留在 v0.2"进行中"，实际已到 0.6/0.7）；
+- 消除"默认只读"的表述与实现不一致：`docs/mcp-setup.md` 新增"实盘下单的安全闸门"
+  对照表（含配置项、默认值、拒绝码），`llms.txt`、`README`、`.env.example` 同步更新；
+- `.gitignore` 增加 `research/` 白名单：脚本与结论报告入库（负面结论同样是资产），
+  大体积数据产物（parquet/csv/html）继续忽略。
+
 ### 新增
 
 - **HTML 交互回测报告**（plotly，extras `report`）：`report/html.py` 渲染单文件自包含

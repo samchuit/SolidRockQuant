@@ -6,13 +6,23 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
+import solidrock.config as cfg_mod
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.live import CfquantBroker, diff_positions
 from tests.conftest import install_fake_module
 
 XTCONSTANT = SimpleNamespace(STOCK_BUY=23, STOCK_SELL=24, FIX_PRICE=11, LATEST_PRICE=5)
+
+# 测试用守卫配置：放行（网关行为由 TestOrderGuard 专门覆盖）
+_PERMISSIVE_GUARD = {
+    "live_max_order_notional": 0.0,
+    "live_symbol_whitelist": None,
+    "live_enforce_trading_hours": False,
+    "live_duplicate_window_seconds": 0,
+}
 
 
 class FakeXtAsset:
@@ -82,16 +92,19 @@ def cf_env(tmp_path):
         ),
     )
     # 环境变量注入账号
-    import solidrock.config as cfg_mod
     import solidrock.data.sources.registry  # noqa: F401 保持依赖图
 
-    original = dict(cfg_mod.get_settings().model_dump())
-    cfg_mod.get_settings().live_account_id = "TEST123"
-    cfg_mod.get_settings().live_account_type = "STOCK"
-    cfg_mod.get_settings().live_read_only = False
+    settings = cfg_mod.get_settings()
+    original = dict(settings.model_dump())
+    settings.live_account_id = "TEST123"
+    settings.live_account_type = "STOCK"
+    settings.live_read_only = False
+    for key, value in _PERMISSIVE_GUARD.items():
+        setattr(settings, key, value)
     yield
-    cfg_mod.get_settings().live_read_only = original.get("live_read_only", True)
-    cfg_mod.get_settings().live_account_id = original.get("live_account_id")
+    for key, value in original.items():
+        if hasattr(settings, key):
+            setattr(settings, key, value)
     sys.modules.pop("cfquant", None)
     sys.modules.pop("cfquant.xttrader", None)
     sys.modules.pop("cfquant.xttype", None)
@@ -164,3 +177,138 @@ class TestReconcile:
 
         md = render_reconcile_markdown({"000001.SZ": 800}, {"000001.SZ": 1000}, [])
         assert "实盘对账" in md
+
+    def test_t1_locked_position_not_rebought(self) -> None:
+        """总持仓已达标、当日买入不可卖（T+1）时不得建议补仓或卖空."""
+        actions = diff_positions(
+            {"000001.SZ": 1000},  # 目标
+            {"000001.SZ": 1000},  # 总持仓已达标（其中 1000 股为当日买入）
+            available={"000001.SZ": 0},
+        )
+        assert actions == []  # 关键：不能因为"可卖为 0"而误判为缺 1000 股
+
+    def test_sell_limited_by_available(self) -> None:
+        """目标减仓但只有部分可卖时，卖单按可用量截断并附说明."""
+        actions = diff_positions(
+            {"000001.SZ": 0},
+            {"000001.SZ": 1000},
+            available={"000001.SZ": 300},
+        )
+        assert actions[0]["action"] == "sell"
+        assert actions[0]["qty"] == 300
+        assert "T+1" in actions[0]["note"]
+
+    def test_hold_when_nothing_sellable(self) -> None:
+        actions = diff_positions({"000001.SZ": 0}, {"000001.SZ": 500}, available={"000001.SZ": 0})
+        assert actions[0]["action"] == "hold"
+        assert actions[0]["qty"] == 0
+
+    def test_untracked_not_liquidated_by_default(self) -> None:
+        """实盘持有但目标未包含的标的默认不清仓，只在 untracked 中提示."""
+        from solidrock.live import untracked_positions
+
+        target = {"000001.SZ": 100}
+        actual = {"000001.SZ": 100, "600519.SH": 500}
+        assert diff_positions(target, actual) == []
+        assert untracked_positions(target, actual) == [{"symbol": "600519.SH", "qty": 500}]
+        # 显式开启后才给出清仓建议
+        forced = diff_positions(target, actual, liquidate_untracked=True)
+        assert {a["symbol"]: a["qty"] for a in forced} == {"600519.SH": 500}
+
+
+class TestOrderGuard:
+    """下单守卫：白名单 / 金额上限 / 交易时段 / 幂等（每项都能独立拦截）."""
+
+    @staticmethod
+    def _guard(tmp_path, clock, **overrides):
+        from solidrock.config import Settings
+        from solidrock.live import LiveOrderGuard
+
+        settings = Settings(live_account_id="TEST123", **overrides)
+        return LiveOrderGuard(settings=settings, data_dir=tmp_path, clock=clock)
+
+    @staticmethod
+    def _at(text: str):
+        return lambda: pd.Timestamp(text)
+
+    def test_whitelist_blocks_other_symbol(self, tmp_path) -> None:
+        guard = self._guard(
+            tmp_path,
+            self._at("2026-09-11 10:00"),
+            live_symbol_whitelist="510300.SH",
+            live_max_order_notional=0.0,
+        )
+        with pytest.raises(SolidRockError) as exc:
+            guard.check("000001.SZ", "buy", 100, price=10.0)
+        assert exc.value.code is ErrorCode.LIVE_SYMBOL_NOT_ALLOWED
+        guard.check("510300.SH", "buy", 100, price=10.0)  # 白名单内放行
+
+    def test_notional_cap(self, tmp_path) -> None:
+        guard = self._guard(tmp_path, self._at("2026-09-11 10:00"), live_max_order_notional=10_000.0)
+        with pytest.raises(SolidRockError) as exc:
+            guard.check("000001.SZ", "buy", 2000, price=10.0)  # 20,000 > 10,000
+        assert exc.value.code is ErrorCode.LIVE_ORDER_TOO_LARGE
+        guard.check("000001.SZ", "buy", 1000, price=10.0)  # 10,000 == 上限，放行
+
+    def test_notional_requires_price_reference(self, tmp_path) -> None:
+        """市价单且本地无数据 → 无法核验金额，拒绝而非放行（默认配置）."""
+        guard = self._guard(tmp_path, self._at("2026-09-11 10:00"))
+        with pytest.raises(SolidRockError) as exc:
+            guard.check("999999.SZ", "buy", 100, price=None)
+        assert exc.value.code is ErrorCode.LIVE_ORDER_TOO_LARGE
+
+    def test_trading_hours_blocked_off_session(self, tmp_path) -> None:
+        guard = self._guard(tmp_path, self._at("2026-09-11 21:30"), live_max_order_notional=0.0)
+        with pytest.raises(SolidRockError) as exc:
+            guard.check("000001.SZ", "buy", 100, price=10.0)
+        assert exc.value.code is ErrorCode.LIVE_NOT_TRADING_HOURS
+
+    def test_trading_hours_blocked_weekend(self, tmp_path) -> None:
+        guard = self._guard(tmp_path, self._at("2026-09-12 10:00"), live_max_order_notional=0.0)  # 周六
+        with pytest.raises(SolidRockError) as exc:
+            guard.check("000001.SZ", "buy", 100, price=10.0)
+        assert exc.value.code is ErrorCode.LIVE_NOT_TRADING_HOURS
+
+    def test_duplicate_order_deduped(self, tmp_path) -> None:
+        guard = self._guard(
+            tmp_path,
+            self._at("2026-09-11 10:00"),
+            live_max_order_notional=0.0,
+            live_duplicate_window_seconds=60,
+        )
+        guard.check("000001.SZ", "buy", 100, price=10.0)
+        guard.record("000001.SZ", "buy", 100, price=10.0)
+        # 相同指纹 → 命中幂等
+        with pytest.raises(SolidRockError) as exc:
+            guard.check("000001.SZ", "buy", 100, price=10.0)
+        assert exc.value.code is ErrorCode.LIVE_DUPLICATE_ORDER
+        # 不同指纹放行
+        guard.check("000001.SZ", "buy", 200, price=10.0)
+
+    def test_guard_cannot_be_bypassed_via_broker(self, tmp_path, cf_env) -> None:
+        """守卫在 broker 内无条件生效：即使显式 read_only=False 也拦得住."""
+        from solidrock.config import Settings
+        from solidrock.live import CfquantBroker, LiveOrderGuard
+
+        settings = Settings(
+            live_account_id="TEST123",
+            live_read_only=False,
+            live_max_order_notional=1000.0,
+            live_enforce_trading_hours=False,
+        )
+        guard = LiveOrderGuard(settings=settings, data_dir=tmp_path)
+        broker = CfquantBroker(account_id="TEST123", read_only=False, data_dir=tmp_path, guard=guard)
+        with pytest.raises(SolidRockError) as exc:
+            broker.submit_order("000001.SZ", "buy", 100, price=100.0)  # 10,000 > 1,000
+        assert exc.value.code is ErrorCode.LIVE_ORDER_TOO_LARGE
+
+    def test_read_only_inherits_settings_by_default(self, tmp_path, cf_env) -> None:
+        """不传 read_only 时继承全局配置（P0：这正是 MCP 工具路径的用法）."""
+        from solidrock.live import CfquantBroker
+
+        cfg_mod.get_settings().live_read_only = True
+        broker = CfquantBroker(account_id="TEST123", data_dir=tmp_path)
+        assert broker.read_only is True
+        with pytest.raises(SolidRockError) as exc:
+            broker.submit_order("000001.SZ", "buy", 100)
+        assert exc.value.code is ErrorCode.LIVE_READ_ONLY

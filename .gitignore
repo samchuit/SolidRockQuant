@@ -32,3 +32,23 @@ Thumbs.db
 # 工具本地状态
 .mimosa/
 site/
+
+# 研究目录：数据产物不入库（体积大、可重新拉取），
+# 但脚本与结论报告必须入库（负面结论同样是资产，见 CHANGELOG）
+research/**/*.parquet
+research/**/*.csv
+research/**/*.txt
+research/**/*.log
+research/**/*.html
+research/**/*.pyc
+# 例外：这些 CSV 是脚本产出的结论性产物，需随脚本一起版本化
+!research/grid_results.csv
+!research/pit_reeval_results.csv
+!research/sentiment_results.csv
+!research/event_results_by_type.csv
+!research/event_results_by_year.csv
+!research/csi1000/factor_ic.csv
+!research/csi1000/fund_factor_ic.csv
+!research/csi1000/cons_current.csv
+# TDX 适配器 docstring 引用的能力/边界说明（源码文档引用，须入库）
+!research/csi1000/tdx_limits_report.txt

@@ -485,7 +485,9 @@ class BacktestEngine:
                 if order.side == "buy" and weight_cap is not None:
                     ref = float(bar["open" if simulator.mode == "next_open" else "close"])
                     total_value = state.portfolio.total_value(state.last_prices)
-                    capped = weight_cap.cap_qty(order.symbol, order.qty, ref, total_value)
+                    # 已持仓市值参与封顶：否则逐笔加仓每笔都能再买满上限
+                    held = abs(state.portfolio.position(order.symbol).shares) * ref
+                    capped = weight_cap.cap_qty(order.symbol, order.qty, ref, total_value, current_value=held)
                     if capped < order.qty:
                         state.rejections.append(
                             {

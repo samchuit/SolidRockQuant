@@ -12,7 +12,8 @@
 - `solidrock.report`：绩效指标（年化/夏普/索提诺/alpha-beta/回撤/卡玛/胜率/盈亏比/换手/月度收益/基准对比）、HTML 交互报告（plotly extras）+ Markdown + JSON 报告。
 - `solidrock.experiments`：SQLite 实验追踪（log_run/list/get/compare）——Agent 迭代的记忆。
 - `solidrock.agent`：MCP Server（`srq mcp serve`）、策略静态校验（前视偏差/幻觉 API 检测）、SKILL.md 操作指南。
-- `solidrock.live`：QMT 实盘（cfquant 桥接，默认只读）——`CfquantBroker` 下单/查询、`LiveSession` 策略驱动实盘会话（`srq live session`，dry-run 默认，open/signal/close 三阶段）、对账 `diff_positions`。
+- `solidrock.live`：QMT 实盘（cfquant 桥接）。`CfquantBroker` 下单/查询、`LiveSession` 策略驱动实盘会话（`srq live session`，dry-run 默认，open/signal/close 三阶段）、对账 `diff_positions`/`untracked_positions`、下单守卫 `LiveOrderGuard`。
+  **安全设计（代码层强制，不可通过传参跳过）**：`SOLIDROCK_LIVE_READ_ONLY` 默认 `true`，只读时 `submit_order`/`cancel_order` 直接拒绝；下单另经守卫——标的白名单（`SOLIDROCK_LIVE_SYMBOL_WHITELIST`）、单笔金额上限（`SOLIDROCK_LIVE_MAX_ORDER_NOTIONAL`，默认 50 万）、交易时段（`SOLIDROCK_LIVE_ENFORCE_TRADING_HOURS`，默认开）、幂等去重（`SOLIDROCK_LIVE_DUPLICATE_WINDOW_SECONDS`，默认 60s）。MCP 的 `live_submit_order` 还需显式 `confirm=true`。
 
 ## 数据规范（全库唯一口径）
 

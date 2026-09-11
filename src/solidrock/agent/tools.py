@@ -750,10 +750,20 @@ def _live_submit_order(
     price: float | None,
     strategy_name: str,
     order_remark: str,
+    confirm: bool,
 ) -> dict[str, Any]:
+    if not confirm:
+        raise err(
+            ErrorCode.PARAM_INVALID,
+            "实盘下单需要显式确认：confirm 必须为 true",
+            hint="先向用户复述标的/方向/数量/价格并取得明确同意，再以 confirm=true 重新调用",
+            details={"symbol": symbol, "side": side, "qty": int(qty), "price": price},
+        )
     from solidrock.live import CfquantBroker
 
-    broker = CfquantBroker(read_only=False)
+    # 只读配置不在此处覆盖：broker 继承 SOLIDROCK_LIVE_READ_ONLY（默认只读）。
+    # 下单另经 LiveOrderGuard（白名单/金额上限/交易时段/幂等），无法通过传参跳过。
+    broker = CfquantBroker()
     receipt = broker.submit_order(
         symbol,
         side,
@@ -768,16 +778,22 @@ def _live_submit_order(
 def _live_cancel_order(order_id: str) -> dict[str, Any]:
     from solidrock.live import CfquantBroker
 
-    return CfquantBroker(read_only=False).cancel_order(order_id)
+    # 撤单是降低风险的动作：同样继承只读配置，不加交易时段限制
+    return CfquantBroker().cancel_order(order_id)
 
 
-def _live_reconcile(paper_name: str | None, target: dict[str, int] | None) -> dict[str, Any]:
-    from solidrock.live import CfquantBroker, diff_positions
+def _live_reconcile(
+    paper_name: str | None,
+    target: dict[str, int] | None,
+    liquidate_untracked: bool,
+) -> dict[str, Any]:
+    from solidrock.live import CfquantBroker, diff_positions, untracked_positions
 
     broker = CfquantBroker(read_only=True)
-    actual = {
-        p.get("stock_code", ""): int(p.get("can_use_volume", p.get("volume", 0)) or 0) for p in broker.query_positions()
-    }
+    # 对比用总持仓 volume；可卖量单独取，供卖出可行性判断（T+1 锁定不误判为缺仓）
+    positions = broker.query_positions()
+    actual = {p.get("stock_code", ""): int(p.get("volume", 0) or 0) for p in positions}
+    available = {p.get("stock_code", ""): int(p.get("can_use_volume", p.get("volume", 0)) or 0) for p in positions}
     if target is None and paper_name:
         from solidrock.backtest.paper import PaperTrader
 
@@ -790,8 +806,14 @@ def _live_reconcile(paper_name: str | None, target: dict[str, int] | None) -> di
         target = {s: int(d["shares"]) for s, d in info["positions"].items()}
     if target is None:
         raise err(ErrorCode.PARAM_INVALID, "需要 paper_name 或 target 二选一")
-    actions = diff_positions(target, actual)
-    return {"actual": actual, "target": target, "suggested_actions": actions}
+    actions = diff_positions(target, actual, available=available, liquidate_untracked=liquidate_untracked)
+    return {
+        "actual": actual,
+        "available": available,
+        "target": target,
+        "untracked": untracked_positions(target, actual),
+        "suggested_actions": actions,
+    }
 
 
 def tool_live_status() -> str:
@@ -815,11 +837,22 @@ def tool_live_submit_order(
     qty: int,
     price: float | None = None,
     strategy_name: str = "solidrock-agent",
+    confirm: bool = False,
 ) -> str:
-    """[工具] 向 QMT 提交实盘订单（真实资金！默认只读模式会拒绝）.
+    """[工具] 向 QMT 提交实盘订单（真实资金！）.
 
     side: buy/sell；qty: 股数（买入整手）；price: None=最新价市价。
-    提交前请与用户二次确认标的、方向、数量。审计日志自动记录。
+
+    **必须显式传 ``confirm=true``** 才会真正提交：这是代码层的二次确认闸门，
+    仅靠提示词约定不足以防误触发。此外还受以下强制约束（任一不满足即拒绝）：
+
+    - 只读配置 ``SOLIDROCK_LIVE_READ_ONLY``（默认 true，拒绝下单）；
+    - 标的须在 ``SOLIDROCK_LIVE_SYMBOL_WHITELIST`` 内（若已配置）；
+    - 单笔名义金额不超过 ``SOLIDROCK_LIVE_MAX_ORDER_NOTIONAL``（默认 50 万）；
+    - 须为交易日且处于 A 股交易时段（09:15-11:30 / 13:00-15:05）；
+    - 60 秒内相同订单视为重复委托并拒绝（幂等去重）。
+
+    调用前请先向用户复述标的、方向、数量、参考价并取得确认。审计日志自动记录。
     """
     return _run_tool(
         _live_submit_order,
@@ -829,20 +862,34 @@ def tool_live_submit_order(
         price=price,
         strategy_name=strategy_name,
         order_remark="mcp",
+        confirm=confirm,
     )
 
 
 def tool_live_cancel_order(order_id: str) -> str:
-    """[工具] 撤销实盘委托。"""
+    """[工具] 撤销实盘委托（撤单是降低风险的动作，不受交易时段限制）."""
     return _run_tool(_live_cancel_order, order_id=order_id)
 
 
-def tool_live_reconcile(paper_name: str | None = None, target: dict[str, int] | None = None) -> str:
+def tool_live_reconcile(
+    paper_name: str | None = None,
+    target: dict[str, int] | None = None,
+    liquidate_untracked: bool = False,
+) -> str:
     """[工具] 实盘对账：对比 QMT 实际持仓与目标（模拟盘持仓或手工指定）.
 
     只输出差异与建议动作，不自动下单。target 形如 {"510300.SH": 1000}。
+
+    默认 ``liquidate_untracked=false``：实盘持有但 target 未包含的标的**不会**
+    被建议清仓，而是单独列在 ``untracked`` 里等人工确认——避免拿局部来源的目标
+    （如只交易少数标的的模拟盘）误清实盘其他持仓。
     """
-    return _run_tool(_live_reconcile, paper_name=paper_name, target=target)
+    return _run_tool(
+        _live_reconcile,
+        paper_name=paper_name,
+        target=target,
+        liquidate_untracked=liquidate_untracked,
+    )
 
 
 def _run_ml_walk_forward(

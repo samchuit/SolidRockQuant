@@ -756,11 +756,19 @@ def live_order(
     price: float | None = typer.Option(None, "--price", help="限价（缺省为最新价市价单）"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印订单参数，不提交"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过交互确认"),
-    read_only: bool | None = typer.Option(None, "--read-only/--no-read-only", help="覆盖只读配置"),
+    read_only: bool | None = typer.Option(
+        None,
+        "--read-only/--no-read-only",
+        help="覆盖只读配置；缺省继承 SOLIDROCK_LIVE_READ_ONLY（默认只读，会拒绝下单）",
+    ),
 ) -> None:
-    """提交实盘订单（默认只读模式会拒绝；真实资金，请谨慎）。"""
+    """提交实盘订单（真实资金）.
+
+    默认继承全局只读配置（SOLIDROCK_LIVE_READ_ONLY，默认 true）——只读时直接拒绝；
+    需 ``--no-read-only`` 或配置 ``SOLIDROCK_LIVE_READ_ONLY=false`` 才可能提交。
+    下单另经下单守卫（白名单/单笔金额上限/交易时段/幂等去重）。
+    """
     from solidrock.backtest.costs import AShareCostModel  # noqa: F401
-    from solidrock.live import CfquantBroker
 
     sym_s: str = symbol.upper()
     side_s: str = side.lower()
@@ -780,7 +788,7 @@ def live_order(
     ):
         raise typer.Abort()
     try:
-        broker = CfquantBroker(read_only=False, data_dir=str(get_settings().resolved_data_dir()))
+        broker = _broker(read_only=read_only)
         receipt = broker.submit_order(
             symbol=sym_s,
             side=side_s,
@@ -800,11 +808,11 @@ def live_cancel(
     yes: bool = typer.Option(False, "--yes", "-y"),
     read_only: bool | None = typer.Option(None, "--read-only/--no-read-only"),
 ) -> None:
-    """撤销委托。"""
+    """撤销委托（撤单是降低风险的动作，不受交易时段限制）."""
     if not yes and not typer.confirm(f"确认撤销委托 {order_id}？"):
         raise typer.Abort()
     try:
-        result = _broker(read_only=False).cancel_order(order_id)
+        result = _broker(read_only=read_only).cancel_order(order_id)
     except SolidRockError as e:
         _print_error(e)
         raise typer.Exit(1) from e
@@ -816,16 +824,24 @@ def live_reconcile(
     paper_name: str | None = typer.Option(None, "--paper", help="对比指定模拟盘的目标持仓"),
     target: str | None = typer.Option(None, "--target", help="逗号分隔的目标持仓，如 510300.SH:1000,000001.SZ:200"),
     yes: bool = typer.Option(False, "--yes", "-y", help="自动按差异下单调仓（真实资金！）"),
+    liquidate_untracked: bool = typer.Option(
+        False,
+        "--liquidate-untracked",
+        help="把实盘持有但目标未包含的标的也当作清仓（默认不，仅在 untracked 中提示）",
+    ),
 ) -> None:
-    """实盘对账：对比 QMT 实际持仓与目标（模拟盘或手工指定），输出差异。"""
-    from solidrock.live import diff_positions, render_reconcile_markdown
+    """实盘对账：对比 QMT 实际持仓与目标（模拟盘或手工指定），输出差异.
+
+    对比用总持仓（volume），卖出受可用量（can_use_volume，T+1 锁定）约束；
+    目标未包含的实盘持仓默认不自动清仓，避免误清。
+    """
+    from solidrock.live import diff_positions, render_reconcile_markdown, untracked_positions
 
     try:
         broker = _broker(read_only=True)
-        actual = {
-            p.get("stock_code", ""): int(p.get("can_use_volume", p.get("volume", 0)) or 0)
-            for p in broker.query_positions()
-        }
+        positions = broker.query_positions()
+        actual = {p.get("stock_code", ""): int(p.get("volume", 0) or 0) for p in positions}
+        available = {p.get("stock_code", ""): int(p.get("can_use_volume", p.get("volume", 0)) or 0) for p in positions}
         tgt: dict[str, int] = {}
         if target:
             for part in target.split(","):
@@ -846,22 +862,24 @@ def live_reconcile(
         else:
             console.print("请指定 --paper <模拟盘名> 或 --target 510300.SH:1000,...", style="yellow")
             raise typer.Exit(1)
-        actions = diff_positions(tgt, actual)
+        actions = diff_positions(tgt, actual, available=available, liquidate_untracked=liquidate_untracked)
+        untracked = untracked_positions(tgt, actual)
     except SolidRockError as e:
         _print_error(e)
         raise typer.Exit(1) from e
 
-    md = render_reconcile_markdown(actual, tgt, actions)
+    md = render_reconcile_markdown(actual, tgt, actions, available=available, untracked=untracked)
     from rich.markdown import Markdown
 
     console.print(Markdown(md))
 
-    if actions and yes:
+    executable = [a for a in actions if a["action"] in ("buy", "sell") and a["qty"] > 0]
+    if executable and yes:
         if not typer.confirm("以上差异将按建议动作向实盘提交真实订单，确认？"):
             raise typer.Abort()
         try:
-            broker = _broker(read_only=False)
-            for a in actions:
+            broker = _broker(read_only=None)
+            for a in executable:
                 receipt = broker.submit_order(a["symbol"], a["action"], a["qty"], price=None)
                 console.print(f"✓ {a['action'].upper()} {a['symbol']} {a['qty']} 股 → order_id={receipt['order_id']}")
         except SolidRockError as e:
@@ -885,14 +903,22 @@ def live_session(
 ) -> None:
     """策略驱动实盘会话：复用回测策略 API，盘中把意图订单翻译为 QMT 委托.
 
-    先 srq data update 更新本地日线再开会话；默认 dry-run（不下单），
-    真实下单需 --execute 且关闭只读（SOLIDROCK_LIVE_READ_ONLY=false）。
+    先 srq data update 更新本地日线再开会话；默认 dry-run（不下单）。
+    真实下单需 ``--execute`` **且**关闭只读（SOLIDROCK_LIVE_READ_ONLY=false）——
+    只读配置在代码层强制生效，此处提前校验以免会话跑空。
     """
+    from solidrock.config import get_settings
     from solidrock.live.session import LiveSession, SessionConfig, run_loop
     from solidrock.strategy.loader import load_strategy_class, parse_param_pairs
 
     if phase not in ("open", "signal", "close", "auto"):
         console.print("[red]--phase 应为 open / signal / close / auto[/red]")
+        raise typer.Exit(1)
+    if execute and get_settings().live_read_only:
+        console.print(
+            "[red]只读模式已开启（SOLIDROCK_LIVE_READ_ONLY=true），--execute 不会下任何单[/red]\n"
+            "如确需真实下单：设置 SOLIDROCK_LIVE_READ_ONLY=false 后重试。",
+        )
         raise typer.Exit(1)
     config = SessionConfig(
         paper_cash=paper_cash,
@@ -902,7 +928,8 @@ def live_session(
     try:
         strategy_cls = load_strategy_class(strategy_file)
         strategy = strategy_cls(**parse_param_pairs(list(param)))
-        broker = None if execute is False else _broker(read_only=False)
+        # broker 继承全局只读配置（不再硬编码 False）；真实下单由配置 + 下单守卫共同约束
+        broker = None if execute is False else _broker(read_only=None)
         session = LiveSession(strategy, _store(), broker, config=config)
         if phase == "auto":
             run_loop(

@@ -170,6 +170,54 @@ class TestJsonSafe:
         json.dumps(envelope, allow_nan=False)
 
 
+class TestLiveToolSafety:
+    """MCP 下单路径的安全闸门（在**工具调用层**验证，而非只测 broker 类）.
+
+    历史缺口：测试只覆盖了 ``CfquantBroker(read_only=True)``，而工具层硬编码
+    ``read_only=False``，于是"默认只读"名存实亡却测试全绿。以下测试直接打工具层。
+    """
+
+    def test_submit_requires_explicit_confirm(self, mcp_env: Path) -> None:
+        from solidrock.agent.tools import tool_live_submit_order
+
+        env = _parse(tool_live_submit_order("510300.SH", "buy", 100))
+        assert env["status"] == "error"
+        assert env["error"]["code"] == "PARAM_INVALID"
+        assert "confirm" in env["error"]["message"]
+
+    def test_submit_blocked_by_read_only_config(self, mcp_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """只读配置必须真正拦住 MCP 下单（无须 cfquant 在线即应拒绝）."""
+        from solidrock.agent.tools import tool_live_submit_order
+        from solidrock.config import get_settings
+
+        monkeypatch.setenv("SOLIDROCK_LIVE_READ_ONLY", "true")
+        monkeypatch.setenv("SOLIDROCK_LIVE_ACCOUNT_ID", "TEST123")
+        get_settings.cache_clear()
+        try:
+            env = _parse(tool_live_submit_order("510300.SH", "buy", 100, confirm=True))
+            assert env["status"] == "error"
+            assert env["error"]["code"] == "LIVE_READ_ONLY"
+        finally:
+            get_settings.cache_clear()
+
+    def test_submit_reaches_guard_when_read_only_off(self, mcp_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """关只读后仍被下单守卫拦住（金额上限），证明守卫在工具路径同样生效."""
+        from solidrock.agent.tools import tool_live_submit_order
+        from solidrock.config import get_settings
+
+        monkeypatch.setenv("SOLIDROCK_LIVE_READ_ONLY", "false")
+        monkeypatch.setenv("SOLIDROCK_LIVE_ACCOUNT_ID", "TEST123")
+        monkeypatch.setenv("SOLIDROCK_LIVE_ENFORCE_TRADING_HOURS", "false")
+        monkeypatch.setenv("SOLIDROCK_LIVE_MAX_ORDER_NOTIONAL", "1000")
+        get_settings.cache_clear()
+        try:
+            env = _parse(tool_live_submit_order("510300.SH", "buy", 100, price=100.0, confirm=True))
+            assert env["status"] == "error"
+            assert env["error"]["code"] == "LIVE_ORDER_TOO_LARGE"
+        finally:
+            get_settings.cache_clear()
+
+
 def _cost_model_placeholder() -> None:
     AShareCostModel(commission_rate=0)
 
