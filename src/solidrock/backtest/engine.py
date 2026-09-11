@@ -7,7 +7,9 @@
     3. 撮合昨日信号（今日开盘价、涨跌停/整手/资金约束）
     4. 更新收盘价 → 逐日盯市（净值曲线）
     5. 回撤熔断检查（触发则次日清仓）
-    6. 策略 on_signal（看到含当日的数据，产出的订单明日撮合）
+    6. 策略钩子：on_market_open（每交易日首 bar）→ on_signal（每 bar，
+       分钟频可配 trigger_times 定时触发）→ on_market_close（每交易日末 bar）；
+       钩子看到含当日的数据，产出的订单明日撮合
 
 ``same_close`` 模式把第 3、6 步合并到当日收盘，供快速研究（报告会标注）。
 
@@ -275,18 +277,24 @@ class BacktestEngine:
 
         tick_idx = {t: i for i, t in enumerate(ticks)}
         cur_date: pd.Timestamp | None = None  # 当前交易日（日内 T+1 解锁只在换日时发生）
+        trigger_times = {str(t) for t in (cfg.trigger_times or [])}
 
-        for day in backtest_ticks:  # 日频=交易日；分钟=bar 时间戳
+        n_ticks = len(backtest_ticks)
+        for i, day in enumerate(backtest_ticks):  # 日频=交易日；分钟=bar 时间戳
             state.now = day
             state.now_idx = tick_idx[day]
             today_bars = {s: panel[s].loc[day] for s in panel if day in panel[s].index}
 
             # 0) 交易日切换（分钟模式在换日时解锁 T+1 与平今计数；日频每 tick 换日）
             tick_date = pd.Timestamp(day).normalize()
-            if tick_date != cur_date:
+            new_day = tick_date != cur_date
+            if new_day:
                 cur_date = tick_date
                 portfolio.release_available()
                 opened_today = {}
+            day_end = i == n_ticks - 1 or pd.Timestamp(backtest_ticks[i + 1]).normalize() != tick_date
+            # 定时触发（仅分钟频）：配置 trigger_times 后 on_signal 只在指定 HH:MM 的 bar 触发
+            fire_signal = cfg.freq == "1d" or not trigger_times or pd.Timestamp(day).strftime("%H:%M") in trigger_times
 
             # 1) 公司行为：复权因子变化 → 持仓调整（主连换月比例复权同样走这里）
             for symbol, bar in today_bars.items():
@@ -319,11 +327,21 @@ class BacktestEngine:
                 if halt is not None and halt.check(nav, day):
                     state.halted = True
                     self._queue_liquidation(state, day)
-                # 6) 策略信号
-                strategy.on_signal(ctx)
+                # 6) 策略钩子：盘前计划 → 信号 → 盘后（订单统一进入 pending，按执行模式撮合）
+                if new_day:
+                    strategy.on_market_open(ctx)
+                if fire_signal:
+                    strategy.on_signal(ctx)
+                if day_end:
+                    strategy.on_market_close(ctx)
             else:  # same_close
                 self._update_closes(state, today_bars)
-                strategy.on_signal(ctx)
+                if new_day:
+                    strategy.on_market_open(ctx)
+                if fire_signal:
+                    strategy.on_signal(ctx)
+                if day_end:
+                    strategy.on_market_close(ctx)
                 self._execute_pending(state, simulator, day, today_bars, weight_cap, spec_map, opened_today)
                 nav = portfolio.total_value(state.last_prices)
                 nav_rows.append(self._nav_row(day, nav, portfolio, state))
@@ -503,7 +521,13 @@ class BacktestEngine:
                     opened_today.get(order.symbol, 0.0) + result.open_qty - result.close_today_qty, 0.0
                 )
             elif order.side == "buy":
-                state.portfolio.buy(order.symbol, result.filled_qty, result.price, result.fees)
+                state.portfolio.buy(
+                    order.symbol,
+                    result.filled_qty,
+                    result.price,
+                    result.fees,
+                    immediate_available=parse_symbol(order.symbol).is_t0,
+                )
                 pnl = None
             else:
                 trade = state.portfolio.sell(order.symbol, result.filled_qty, result.price, result.fees)
@@ -650,6 +674,12 @@ class BacktestEngine:
         result.trades.to_csv(artifacts_dir / "trades.csv", index=False)
         result.nav.to_csv(artifacts_dir / "nav.csv")
         result.artifacts_dir = artifacts_dir
+        try:
+            from solidrock.report.html import write_report_html
+
+            write_report_html(result, artifacts_dir / "report.html")
+        except ImportError:
+            pass  # plotly 未安装（extras report）：仅保留 Markdown/JSON 产物
 
         tracker = ExperimentTracker(self.store.root / "experiments.db")
         tracker.log_run(

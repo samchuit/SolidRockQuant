@@ -123,8 +123,9 @@ class TestEnvelopes:
         data = env["data"]
         assert data["strategy"] == "DemoMA"
         assert "sharpe" in data["metrics"]
-        assert len(data["artifacts"]) == 4
+        assert len(data["artifacts"]) == 5  # html/md/json/trades/nav（plotly 可用时含 report.html）
         assert all(Path(p).exists() for p in data["artifacts"])
+        assert any(p.endswith("report.html") for p in data["artifacts"])
         # 自动留痕
         tracker = ExperimentTracker(mcp_env / "mkt" / "experiments.db")
         assert tracker.get_run(data["run_id"])["name"] == "mcp-e2e"

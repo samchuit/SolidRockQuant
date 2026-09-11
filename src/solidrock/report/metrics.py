@@ -36,14 +36,18 @@ def compute_metrics(
             "annual_return": 0.0,
             "annual_vol": 0.0,
             "sharpe": 0.0,
+            "sortino": 0.0,
             "max_drawdown": 0.0,
             "calmar": 0.0,
             "daily_win_rate": 0.0,
+            "max_consecutive_win_days": 0.0,
+            "max_consecutive_loss_days": 0.0,
         }
     returns = nav.pct_change().dropna()
     total_return = _safe_float(nav.iloc[-1] / nav.iloc[0] - 1.0)
     years = (n - 1) / _TRADING_DAYS_PER_YEAR
-    annual_return = _safe_float((nav.iloc[-1] / nav.iloc[0]) ** (1.0 / years) - 1.0) if years > 0 else 0.0
+    growth = total_return + 1.0
+    annual_return = _safe_float(growth ** (1.0 / years) - 1.0) if years > 0 and growth > 0 else 0.0
     std = _safe_float(returns.std(ddof=1)) if len(returns) > 1 else 0.0
     annual_vol = std * math.sqrt(_TRADING_DAYS_PER_YEAR)
     sharpe = _safe_float(returns.mean() / std * math.sqrt(_TRADING_DAYS_PER_YEAR)) if std > 1e-12 else 0.0
@@ -56,9 +60,11 @@ def compute_metrics(
         annual_return=annual_return,
         annual_vol=annual_vol,
         sharpe=sharpe,
+        sortino=_sortino(returns),
         max_drawdown=max_drawdown,
         calmar=calmar,
         daily_win_rate=_safe_float((returns > 0).mean()),
+        **_consecutive_day_streaks(returns),
     )
 
     # 交易层面
@@ -75,6 +81,8 @@ def compute_metrics(
             gains = _safe_float(closed.loc[closed["pnl"] > 0, "pnl"].sum())
             losses = _safe_float(-closed.loc[closed["pnl"] < 0, "pnl"].sum())
             out["profit_factor"] = _safe_float(gains / losses) if losses > 1e-12 else float("inf") if gains > 0 else 0.0
+            out["max_single_win"] = _safe_float(closed["pnl"].max())
+            out["max_single_loss"] = _safe_float(closed["pnl"].min())
         # 年化换手率：双边成交额 / 2 / 平均净值 / 年
         if n > 1:
             years_bt = (n - 1) / _TRADING_DAYS_PER_YEAR
@@ -93,7 +101,61 @@ def compute_metrics(
         out["benchmark_annual_return"] = b_annual
         out["excess_total_return"] = total_return - b_total
         out["excess_annual_return"] = annual_return - b_annual
+        alpha, beta = _alpha_beta(nav, benchmark)
+        out["alpha"] = alpha
+        out["beta"] = beta
     return out
+
+
+def _sortino(returns: pd.Series, mar: float = 0.0) -> float:
+    """索提诺比率：年化超额收益 / 年化下行波动（仅 MAR 以下收益计入风险）。"""
+    downside = (returns - mar).clip(upper=0.0)
+    dd_risk = _safe_float(math.sqrt(float((downside**2).mean()))) * math.sqrt(_TRADING_DAYS_PER_YEAR)
+    if dd_risk <= 1e-12:
+        return 0.0
+    return _safe_float((returns.mean() - mar) * _TRADING_DAYS_PER_YEAR / dd_risk)
+
+
+def _consecutive_day_streaks(returns: pd.Series) -> dict[str, float]:
+    """最大连续盈利/亏损天数（以日收益正负计，0 视为中断）。"""
+    max_win = max_loss = 0
+    win = loss = 0
+    for r in returns:
+        if r > 0:
+            win += 1
+            loss = 0
+        elif r < 0:
+            loss += 1
+            win = 0
+        else:
+            win = loss = 0
+        max_win = max(max_win, win)
+        max_loss = max(max_loss, loss)
+    return {"max_consecutive_win_days": float(max_win), "max_consecutive_loss_days": float(max_loss)}
+
+
+def _alpha_beta(nav: pd.Series, benchmark: pd.Series) -> tuple[float, float]:
+    """CAPM 口径：beta = cov/var（日收益按索引对齐），Jensen's alpha = (mean(r) - beta·mean(rb)) × 252."""
+    b = benchmark.reindex(nav.index).dropna()
+    if len(b) < 2:
+        return 0.0, 0.0
+    r = nav.pct_change().dropna()
+    rb = b.pct_change().dropna()
+    aligned_r, aligned_rb = r.align(rb, join="inner")
+    if len(aligned_r) < 2:
+        return 0.0, 0.0
+    var_b = _safe_float(aligned_rb.var(ddof=1))
+    beta = _safe_float(aligned_r.cov(aligned_rb) / var_b) if var_b > 1e-12 else 0.0
+    alpha_daily = _safe_float(aligned_r.mean()) - beta * _safe_float(aligned_rb.mean())
+    return _safe_float(alpha_daily * _TRADING_DAYS_PER_YEAR), beta
+
+
+def monthly_returns(nav: pd.Series) -> pd.Series:
+    """月度收益，索引为 'YYYY-MM' 字符串（报告热力图用）。"""
+    if len(nav) < 2:
+        return pd.Series(dtype="float64")
+    daily = nav.pct_change().fillna(0.0)
+    return (1.0 + daily).groupby(nav.index.to_period("M")).prod().sub(1.0).rename(index=str)
 
 
 def yearly_returns(nav: pd.Series) -> pd.Series:
@@ -119,17 +181,25 @@ def format_metrics(metrics: Mapping[str, float]) -> list[tuple[str, str]]:
         "excess_total_return",
         "excess_annual_return",
         "annual_turnover",
+        "alpha",
     }
     names = {
         "total_return": "累计收益",
         "annual_return": "年化收益",
         "annual_vol": "年化波动",
         "sharpe": "夏普比率",
+        "sortino": "索提诺比率",
         "max_drawdown": "最大回撤",
         "calmar": "卡玛比率",
+        "alpha": "阿尔法",
+        "beta": "贝塔",
         "daily_win_rate": "日胜率",
+        "max_consecutive_win_days": "最大连续盈利天数",
+        "max_consecutive_loss_days": "最大连续亏损天数",
         "trade_win_rate": "交易胜率",
         "profit_factor": "盈亏比",
+        "max_single_win": "单笔最大盈利(元)",
+        "max_single_loss": "单笔最大亏损(元)",
         "n_trades": "成交笔数",
         "total_fees": "总费用(元)",
         "annual_turnover": "年化换手率",
@@ -145,9 +215,9 @@ def format_metrics(metrics: Mapping[str, float]) -> list[tuple[str, str]]:
         value = metrics[key]
         if key in as_pct:
             rows.append((label, f"{value * 100:.2f}%"))
-        elif key in ("n_trades",):
+        elif key in ("n_trades", "max_consecutive_win_days", "max_consecutive_loss_days"):
             rows.append((label, f"{int(value)}"))
-        elif key == "total_fees":
+        elif key in ("total_fees", "max_single_win", "max_single_loss"):
             rows.append((label, f"{value:,.2f}"))
         elif key == "profit_factor":
             rows.append((label, "∞" if value == float("inf") else f"{value:.2f}"))

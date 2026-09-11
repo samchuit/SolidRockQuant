@@ -5,11 +5,14 @@
 ## 模块地图
 
 - `solidrock.data`：数据层。`create_source(name)` 数据源（akshare/tushare，可插拔）、`DataStore` 本地仓库（Parquet+DuckDB、增量更新、版本快照）、`TradingCalendar` 交易日历、`parse_symbol` 符号规范（`000001.SZ` / `RB2505.SHFE` / 主连 `RB.SHFE`）。
-- `solidrock.backtest`：回测。`BacktestEngine(strategy, config, store).run()` 事件驱动引擎；A股规则内置（T+1、涨跌停、整手、佣金/印花税/滑点）；默认 `next_open` 防前视执行。
-- `solidrock.strategy`：`Strategy` 基类（params 声明 + setup/on_signal 钩子）、Context API（order/order_target_percent/history/portfolio）。
-- `solidrock.report`：绩效指标（年化/夏普/回撤/卡玛/胜率/换手/基准对比）、Markdown + JSON 报告。
+- `solidrock.backtest`：回测。`BacktestEngine(strategy, config, store).run()` 事件驱动引擎；A股规则内置（T+1、T+0 品种识别、涨跌停、整手、佣金/印花税/滑点）；默认 `next_open` 防前视执行；分钟频（1m/5m）支持 `trigger_times` 定时触发。
+- `solidrock.strategy`：`Strategy` 基类（params 声明 + setup / on_market_open / on_signal / on_market_close / on_stop 钩子）、Context API（order/order_target_percent/history/portfolio）。
+- `solidrock.indicators`：向量化技术指标（sma/ema/macd/rsi/boll/atr/kdj/hhv/llv/cross…，通达信口径，兼容 Series 与宽表）。
+- `solidrock.factors`：因子基座 + 内置因子（Mom/Reversal/Volatility/Illiq/VWAPDev/AtrRatio，导入即注册）+ RankIC/分层分析；`resolve_factor` 支持"注册名或文件路径"。
+- `solidrock.report`：绩效指标（年化/夏普/索提诺/alpha-beta/回撤/卡玛/胜率/盈亏比/换手/月度收益/基准对比）、HTML 交互报告（plotly extras）+ Markdown + JSON 报告。
 - `solidrock.experiments`：SQLite 实验追踪（log_run/list/get/compare）——Agent 迭代的记忆。
 - `solidrock.agent`：MCP Server（`srq mcp serve`）、策略静态校验（前视偏差/幻觉 API 检测）、SKILL.md 操作指南。
+- `solidrock.live`：QMT 实盘（cfquant 桥接，默认只读）——`CfquantBroker` 下单/查询、`LiveSession` 策略驱动实盘会话（`srq live session`，dry-run 默认，open/signal/close 三阶段）、对账 `diff_positions`。
 
 ## 数据规范（全库唯一口径）
 
@@ -19,7 +22,7 @@
 
 ## MCP 工具（`srq mcp serve`，统一 JSON 信封）
 
-get_data_overview / data_health / list_data_sources / search_instruments / fetch_bars（1d/1m/5m）/ get_trading_calendar / validate_strategy / run_backtest / run_backtest_sandboxed / run_factor_analysis / run_vectorized_backtest / run_paper_session / paper_status / live_status / live_orders / live_trades / live_submit_order（真实资金）/ live_cancel_order / live_reconcile / list_experiments / get_experiment / compare_experiments
+get_data_overview / data_health / list_data_sources / search_instruments / fetch_bars（1d/1m/5m）/ get_trading_calendar / validate_strategy / run_backtest / run_backtest_sandboxed / run_factor_analysis / run_vectorized_backtest / run_ml_walk_forward / run_paper_session / paper_status / live_status / live_orders / live_trades / live_submit_order（真实资金）/ live_cancel_order / live_reconcile / list_experiments / get_experiment / compare_experiments
 
 ## 错误约定
 

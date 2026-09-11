@@ -28,6 +28,22 @@ ALL_EXCHANGES = STOCK_EXCHANGES | FUTURES_EXCHANGES | OVERSEAS_EXCHANGES
 
 VALID_SYMBOL_EXAMPLES = "000001.SZ / 600519.SH / 000300.SH / 510300.SH / RB2505.SHFE / RB.SHFE / AAPL.NASDAQ"
 
+# 深交所 T+0 ETF（跨境/黄金/商品期货等，无干净代码段规则，列出常见品种；非穷举，以交易所最新规则为准）
+SZ_T0_ETFS = frozenset(
+    {
+        "159920",  # 恒生 ETF（跨境）
+        "159941",  # 纳指 ETF（跨境）
+        "159934",  # 易方达黄金 ETF
+        "159937",  # 博时黄金 ETF
+        "159942",  # 华夏黄金 ETF
+        "159980",  # 有色期货 ETF
+        "159985",  # 豆粕期货 ETF
+        "159981",  # 能源化工期货 ETF
+    }
+)
+# 沪市 T+0 ETF 代码段：511 债券/货币、513 跨境、518 黄金
+SH_T0_ETF_PREFIXES = frozenset({"511", "513", "518"})
+
 
 class AssetType(str, Enum):
     """资产类型（数据源适配器为权威，此处的推断仅用于展示与路由）。"""
@@ -54,6 +70,22 @@ class Symbol:
     @property
     def is_futures(self) -> bool:
         return self.exchange in FUTURES_EXCHANGES
+
+    @property
+    def is_t0(self) -> bool:
+        """是否 T+0 回转交易（尽力推断，撮合层的 T+1 约束依据）.
+
+        期货天然 T+0；股票/北交所 T+1；ETF 按品种：沪市 511/513/518 段
+        （债券/货币、跨境、黄金）与深市常见跨境/黄金/商品 ETF 为 T+0，
+        其余 ETF T+1。列表非穷举，以交易所最新规则为准。
+        """
+        if self.is_futures:
+            return True
+        if self.asset_type is not AssetType.ETF:
+            return False
+        if self.exchange == "SH" and self.code[:3] in SH_T0_ETF_PREFIXES:
+            return True
+        return self.code in SZ_T0_ETFS
 
     def __str__(self) -> str:
         return self.value

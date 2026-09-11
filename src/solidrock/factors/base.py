@@ -157,3 +157,16 @@ def list_registered_factors() -> list[str]:
 def load_factor_class(path: str | Path) -> type[Factor]:
     """加载因子文件中的 Factor 子类（文件内应只定义一个）。"""
     return load_class_from_file(path, Factor, "因子")
+
+
+def resolve_factor(spec: str | Path, **params: Any) -> Factor:
+    """按"已注册因子名"或"因子文件路径"实例化因子（CLI/MCP 统一入口）.
+
+    优先按注册名解析（含内置因子与插件因子）；注册表未命中且 spec 是
+    存在的文件路径时，按文件加载。
+    """
+    name = str(spec)
+    if not Path(name).exists():
+        return create_factor(name, **params)
+    cls = load_factor_class(Path(name))
+    return cls(**params)

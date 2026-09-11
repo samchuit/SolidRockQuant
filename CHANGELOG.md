@@ -5,7 +5,43 @@
 
 ## [Unreleased]
 
-（v0.7 规划：策略驱动实盘会话、期货实盘需 CTP 环境）
+### 新增
+
+- **HTML 交互回测报告**（plotly，extras `report`）：`report/html.py` 渲染单文件自包含
+  HTML——净值 vs 基准 + 回撤、月度收益热力图、日收益分布、滚动夏普、核心指标表、
+  拒单表；引擎产物链自动写出 `report.html`（plotly 未安装时优雅跳过），
+  MCP `run_backtest` 产物列表按存在性返回
+- **向量化指标库**：`solidrock/indicators.py`——sma/ema/ref/diff/hhv/llv/cross/
+  roc/bias/macd/rsi/boll/atr/kdj，兼容 Series 与多标的宽表，平滑口径对齐通达信/MyTT
+- **内置因子**：`factors/builtin.py` 导入即注册——Mom / Reversal / Volatility /
+  Illiq（Amihud）/ VWAPDev / AtrRatio；`resolve_factor` 统一"注册名或文件路径"
+  解析，`srq factor analyze/screen` 与 MCP 因子工具均支持内置因子名直用
+- **策略盘前/盘后钩子**：`Strategy.on_market_open` / `on_market_close`（日频每
+  交易日一次；分钟频=当日首/末 bar），统一 bar 级 no-lookahead 语义（订单按执行
+  模式撮合）；分钟频 `BacktestConfig.trigger_times` 定时触发（如 `["09:31","14:55"]`），
+  CLI `srq backtest run --freq --trigger-times`
+- **策略驱动实盘会话**：`live/session.py` `LiveSession` + `srq live session`——
+  复用回测策略 API（Context/EngineState）与本地数据，组合快照来自 QMT 实时查询
+  （字段防御式映射），意图订单翻译为实盘委托（买入整手、市价/限价、审计日志）；
+  默认 dry-run，真实下单需 `--execute` 且关闭只读；`--phase auto` 常驻调度
+  （盘前 open → 定时 signal → 盘后 close + 通知），三阶段摘要落盘
+  `{data_dir}/live/sessions/`
+- **T+0 品种撮合规则**：`Symbol.is_t0` 尽力推断（沪市 511/513/518 段、深市常见
+  跨境/黄金/商品 ETF、期货），T0 品种当日买入当日可卖（`Portfolio.buy`
+  `immediate_available`），分钟回测下与 T+1 品种行为可验证区分
+- **绩效指标补齐**：索提诺、Jensen's alpha / beta、月度收益（`monthly_returns`）、
+  最大连续盈利/亏损天数、单笔最大盈亏；Markdown/CLI 报告同步展示
+
+### 修复
+
+- **`scipy` 依赖未声明**：`portfolio/optimizer.py` 引用 scipy 但 pyproject 未声明
+  （此前靠 ml extras 中 sklearn 间接带入），独立安装基础包即 `ImportError`——
+  现显式声明于核心依赖
+- `metrics.compute_metrics` 负净值时年化计算触发 `RuntimeWarning`（现降级为 0）
+- tdx 数据源 `_get_xdxr` 中无效的 `self.__class__ and ...` 表达式导致的 mypy
+  union-attr 报错；清理无效 `noqa`、未使用变量与超长行（cli/tdx_source）
+
+（v0.7 余项：期货实盘需 CTP 环境）
 
 ## [0.6.0] - 2026-09-09
 

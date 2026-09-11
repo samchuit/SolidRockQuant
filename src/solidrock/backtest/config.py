@@ -24,6 +24,7 @@ class BacktestConfig:
     limit_ratio_overrides: dict[str, float] = field(default_factory=dict)  # 如 ST 0.05
     warmup_bars: int = 250  # start 之前预加载的 bar 数（供指标计算）
     freq: str = "1d"  # 回测频率：1d（事件引擎）/ 1m / 5m（分钟实验性）
+    trigger_times: list[str] | None = None  # 分钟频 on_signal 定时触发，如 ["09:31","14:55"]；None=每 bar
     round_lot: bool = True
     cost_model: CostModel | None = None  # None → AShareCostModel()
     futures_cost_model: FuturesCostModel | None = None  # None → 默认期货费率（universe 含期货时）
@@ -44,6 +45,7 @@ class BacktestConfig:
             "drawdown_halt": self.drawdown_halt,
             "warmup_bars": self.warmup_bars,
             "freq": self.freq,
+            "trigger_times": list(self.trigger_times) if self.trigger_times else None,
             "round_lot": self.round_lot,
             "name": self.name,
             "notes": self.notes,

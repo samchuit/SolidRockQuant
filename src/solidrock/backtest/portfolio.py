@@ -104,8 +104,12 @@ class Portfolio:
         }
 
     # ---------------------------------------------------------------- 变动
-    def buy(self, symbol: str, qty: float, price: float, cost: float) -> None:
-        """买入：扣现金、增持仓（T+1 当日不可卖）、摊入成本."""
+    def buy(self, symbol: str, qty: float, price: float, cost: float, *, immediate_available: bool = False) -> None:
+        """买入：扣现金、增持仓、摊入成本.
+
+        ``immediate_available``：T+0 品种（如跨境/债券/黄金 ETF）当日买入
+        当日可卖；默认 False（T+1，换日由 ``release_available`` 解锁）。
+        """
         if qty <= 0:
             raise err(ErrorCode.PARAM_INVALID, f"买入数量必须为正，收到 {qty}")
         pos = self.positions.setdefault(symbol, Position(symbol=symbol))
@@ -120,6 +124,8 @@ class Portfolio:
         new_shares = pos.shares + qty
         pos.avg_cost = (pos.shares * pos.avg_cost + qty * price + cost) / new_shares
         pos.shares = new_shares
+        if immediate_available:
+            pos.available += qty
         pos.last_price = price
 
     def sell(self, symbol: str, qty: float, price: float, cost: float) -> TradeRecord:

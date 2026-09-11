@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -95,26 +96,61 @@ def data_update(
     freq: str = typer.Option("1d", "--freq", help="频率：1d / 1m / 5m"),
     no_adj: bool = typer.Option(False, "--no-adj", help="跳过复权因子（更快，但前复权不可用）"),
 ) -> None:
-    """拉取/更新行情到本地仓库（增量幂等）。"""
+    """拉取/更新行情到本地仓库（增量幂等，主源失败自动降级备用源）。"""
     settings = get_settings()
     symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     try:
         validate_symbols(symbol_list)
-        src = create_source(source or settings.default_source)
         store = _store()
         fetch_start = start
         if fetch_start is None and not full:
             fetch_start = _incremental_start(store, symbol_list, freq=freq)
-        with console.status(f"[cyan]{src.name} 拉取 {len(symbol_list)} 个标的（{freq}）…"):
-            df = src.fetch_bars(symbol_list, start=fetch_start, end=end, freq=freq, with_adj_factor=not no_adj)
-            if df.empty:
-                raise SolidRockError(
-                    ErrorCode.NO_DATA,
-                    f"数据源 {src.name} 未返回任何数据"
-                    + (f"（区间 {fetch_start} ~ {end}）" if fetch_start or end else ""),
-                    hint="检查符号与日期区间；首次拉取建议显式给 --start",
+        # 降级链：主源失败（网络/无数据）自动尝试备用源；参数类错误不降级
+        primary = source or settings.default_source
+        fallbacks = [s.strip() for s in settings.source_fallbacks.split(",") if s.strip() and s.strip() != primary]
+        chain = [primary, *fallbacks]
+        src = None
+        totals = None
+        errors: list[str] = []
+        for i, name in enumerate(chain):
+            try:
+                src = create_source(name)
+            except SolidRockError as e:
+                errors.append(f"{name}: {e.message}")
+                continue
+            try:
+                with console.status(f"[cyan]{src.name} 拉取 {len(symbol_list)} 个标的（{freq}）…"):
+                    df = src.fetch_bars(symbol_list, start=fetch_start, end=end, freq=freq, with_adj_factor=not no_adj)
+                    if df.empty:
+                        raise SolidRockError(
+                            ErrorCode.NO_DATA,
+                            f"数据源 {src.name} 未返回任何数据"
+                            + (f"（区间 {fetch_start} ~ {end}）" if fetch_start or end else ""),
+                            hint="检查符号与日期区间；首次拉取建议显式给 --start",
+                        )
+                    totals = store.update_bars(df, freq=freq, source=src.name)
+                break
+            except SolidRockError as e:
+                errors.append(f"{name}: {e.message}")
+                if e.code in (ErrorCode.PARAM_INVALID, ErrorCode.SOURCE_NOT_REGISTERED):
+                    raise
+                if i < len(chain) - 1:
+                    console.print(f"[yellow]数据源 {name} 失败（{e.message}），降级尝试 {chain[i + 1]}…[/yellow]")
+                src = None
+        if totals is None or src is None:
+            from solidrock.agent.errors import err
+
+            _print_error(
+                err(
+                    ErrorCode.SOURCE_REQUEST_FAILED,
+                    "全部数据源拉取失败",
+                    hint="检查网络与符号拼写；或换数据源：srq data update --source <名称>",
+                    details={"chain": errors},
                 )
-            totals = store.update_bars(df, freq=freq, source=src.name)
+            )
+            raise typer.Exit(1) from None
+        if len(errors):
+            console.print(f"[yellow]降级链记录：{'；'.join(errors)}[/yellow]", style="dim")
     except SolidRockError as e:
         _print_error(e)
         raise typer.Exit(1) from e
@@ -128,6 +164,17 @@ def data_update(
     console.print(
         "下一步：srq data peek <符号> 查看样本；srq data snapshot create <tag> 固定数据版本",
         style="dim",
+    )
+
+
+def _last_err(messages: list[str]) -> SolidRockError:
+    """降级链全失败时，把逐源错误汇总为一条 SOURCE_REQUEST_FAILED."""
+    from solidrock.agent.errors import err as _err
+
+    return _err(
+        ErrorCode.SOURCE_REQUEST_FAILED,
+        "全部数据源拉取失败：" + "；".join(messages),
+        hint="检查网络与服务器状态；可用 srq data tdx-scan 重扫通达信服务器池",
     )
 
 
@@ -145,6 +192,72 @@ def _incremental_start(store: DataStore, symbol_list: list[str], *, freq: str = 
             return (earliest + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         return earliest.strftime("%Y-%m-%d")
     return "1990-01-01"
+
+
+@data_app.command("tdx-scan")
+def data_tdx_scan(
+    timeout: int = typer.Option(3, "--timeout", help="单服务器连接超时秒数"),
+) -> None:
+    """扫描通达信行情服务器池，探测可用 K 线服务器并写入 tdx_servers.json.
+
+    TdxSource 启动时优先使用该文件中的服务器（故障转移池维护）。
+    """
+    from solidrock.agent.errors import err
+
+    try:
+        from pytdx.config.hosts import hq_hosts
+        from pytdx.hq import TdxHq_API
+    except ImportError:
+        _print_error(err(ErrorCode.SOURCE_UNAVAILABLE, "pytdx 未安装", hint="pip install pytdx"))
+        raise typer.Exit(1) from None
+
+    from solidrock.data.sources.tdx_source import DEFAULT_SERVERS
+
+    pool: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for s in [*DEFAULT_SERVERS, *((h[1], h[2]) for h in hq_hosts)]:
+        if s not in seen:
+            seen.add(s)
+            pool.append(s)
+
+    def probe(ip: str, port: int) -> bool:
+        api = TdxHq_API()
+        try:
+            if not api.connect(ip, port, time_out=timeout):
+                return False
+            bars = api.get_security_bars(9, 0, "000001", 0, 3)
+            return bool(bars)
+        except Exception:
+            return False
+        finally:
+            with contextlib.suppress(Exception):
+                api.disconnect()
+
+    healthy: list[tuple[str, int]] = []
+    with console.status(f"[cyan]扫描 {len(pool)} 台服务器…"):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for (ip, port), ok in zip(pool, ex.map(lambda s: probe(s[0], s[1]), pool), strict=True):
+                mark = "[green]✓[/green]" if ok else "[dim]✗[/dim]"
+                console.print(f"  {mark} {ip}:{port}")
+                if ok:
+                    healthy.append((ip, port))
+
+    if not healthy:
+        _print_error(err(ErrorCode.SOURCE_REQUEST_FAILED, "未发现可用的通达信行情服务器"))
+        raise typer.Exit(1) from None
+
+    out = get_settings().resolved_data_dir() / "tdx_servers.json"
+    out.write_text(
+        json.dumps(
+            {"updated_at": pd.Timestamp.now().isoformat(), "servers": [list(s) for s in healthy]},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    console.print(f"可用服务器 {len(healthy)}/{len(pool)} → 已写出 {out}")
 
 
 @data_app.command("calendar")
@@ -325,23 +438,30 @@ def backtest_run(
     benchmark: str | None = typer.Option("000300.SH", "--benchmark", help="基准（none 关闭）"),
     cash: float = typer.Option(1_000_000.0, "--cash", help="初始资金"),
     execution: str = typer.Option("next_open", "--execution", help="next_open | same_close"),
+    freq: str = typer.Option("1d", "--freq", help="频率：1d / 1m / 5m"),
+    trigger_times: str | None = typer.Option(
+        None, "--trigger-times", help="分钟频 on_signal 定时触发，逗号分隔 HH:MM（如 09:31,14:55）"
+    ),
     param: list[str] = typer.Option([], "--param", "-p", help="策略参数 k=v，可多次"),
     name: str | None = typer.Option(None, "--name", help="实验名"),
     no_experiment: bool = typer.Option(False, "--no-experiment", help="不写入实验追踪"),
 ) -> None:
-    """运行回测：产出 report.md / result.json / trades.csv / nav.csv 并自动留痕."""
+    """运行回测：产出 report.html / report.md / result.json / trades.csv / nav.csv 并自动留痕."""
     from solidrock.backtest import BacktestConfig, BacktestEngine
     from solidrock.report.metrics import format_metrics
     from solidrock.strategy.loader import load_strategy_class, parse_param_pairs
 
     params = parse_param_pairs(list(param))
     strategy_cls = load_strategy_class(strategy_file)
+    triggers = [t.strip() for t in trigger_times.split(",") if t.strip()] if trigger_times else None
     cfg = BacktestConfig(
         start=start,
         end=end,
         benchmark=None if benchmark and benchmark.lower() == "none" else benchmark,
         execution=execution,  # type: ignore[arg-type]
         initial_cash=cash,
+        freq=freq,
+        trigger_times=triggers,
         name=name,
         log_experiment=not no_experiment,
     )
@@ -371,7 +491,7 @@ app.add_typer(factor_app, name="factor")
 
 @factor_app.command("analyze")
 def factor_analyze(
-    factor_file: Path = typer.Argument(..., help="因子文件路径（内含一个 Factor 子类）"),
+    factor: str = typer.Argument(..., help="因子文件路径（内含一个 Factor 子类）或已注册因子名（如内置 Mom）"),
     universe: str = typer.Option(..., "--universe", "-u", help="逗号分隔的股票池符号"),
     start: str = typer.Option(..., "--start"),
     end: str = typer.Option(..., "--end"),
@@ -382,15 +502,21 @@ def factor_analyze(
     no_experiment: bool = typer.Option(False, "--no-experiment"),
 ) -> None:
     """运行因子分析：RankIC + 分层回测，自动留痕."""
-    from solidrock.factors import analyze_factor, load_factor_class
+    from solidrock.factors import analyze_factor, list_registered_factors, resolve_factor
     from solidrock.strategy.loader import parse_param_pairs
 
     universe_list = [s.strip().upper() for s in universe.split(",") if s.strip()]
     try:
         validate_symbols(universe_list)
-        factor_cls = load_factor_class(factor_file)
+        if not Path(factor).exists() and factor not in list_registered_factors():
+            console.print(
+                f"[red]未找到因子：{factor!r} 既不是已注册因子名，也不是存在的文件路径[/red]\n"
+                f"已注册因子：{', '.join(list_registered_factors())}",
+                style="dim",
+            )
+            raise typer.Exit(1)
         result = analyze_factor(
-            factor_cls(**parse_param_pairs(list(param))),
+            resolve_factor(factor, **parse_param_pairs(list(param))),
             _store(),
             universe_list,
             start=start,
@@ -422,7 +548,7 @@ def factor_analyze(
 
 @factor_app.command("screen")
 def factor_screen(
-    factor_file: Path = typer.Argument(..., help="因子文件路径（内含一个 Factor 子类）"),
+    factor: str = typer.Argument(..., help="因子文件路径或已注册因子名（如内置 Mom）"),
     universe: str = typer.Option(..., "--universe", "-u", help="逗号分隔的股票池符号"),
     start: str = typer.Option(..., "--start"),
     end: str = typer.Option(..., "--end"),
@@ -442,7 +568,7 @@ def factor_screen(
     try:
         validate_symbols(universe_list)
         raw = tool_run_vectorized_backtest(
-            factor_file=str(factor_file),
+            factor_file=factor,
             universe=universe_list,
             start=start,
             end=end,
@@ -741,6 +867,77 @@ def live_reconcile(
         except SolidRockError as e:
             _print_error(e)
             raise typer.Exit(1) from e
+
+
+@live_app.command("session")
+def live_session(
+    strategy_file: Path = typer.Argument(..., help="策略文件路径（与回测同一 Strategy 子类）"),
+    phase: str = typer.Option("signal", "--phase", help="运行阶段：open / signal / close / auto（常驻循环）"),
+    trigger_times: str = typer.Option("14:50", "--trigger-times", help="auto 模式盘中触发点，逗号分隔 HH:MM"),
+    open_time: str = typer.Option("09:25", "--open-time", help="auto 模式盘前钩子时点"),
+    close_time: str = typer.Option("15:05", "--close-time", help="auto 模式盘后钩子时点"),
+    execute: bool = typer.Option(False, "--execute", help="真实下单（默认 dry-run 只产出意图清单）"),
+    limit_pct: float | None = typer.Option(None, "--limit-pct", help="限价偏离比例（如 0.001）；缺省为市价"),
+    paper_cash: float = typer.Option(1_000_000.0, "--paper-cash", help="dry-run 且无 broker 时的模拟资金"),
+    param: list[str] = typer.Option([], "--param", "-p", help="策略参数 k=v，可多次"),
+    name: str | None = typer.Option(None, "--name", help="会话名（审计与通知标识）"),
+    now: str | None = typer.Option(None, "--now", help="以指定时点运行阶段（调试用，如 2026-09-11 14:50）"),
+) -> None:
+    """策略驱动实盘会话：复用回测策略 API，盘中把意图订单翻译为 QMT 委托.
+
+    先 srq data update 更新本地日线再开会话；默认 dry-run（不下单），
+    真实下单需 --execute 且关闭只读（SOLIDROCK_LIVE_READ_ONLY=false）。
+    """
+    from solidrock.live.session import LiveSession, SessionConfig, run_loop
+    from solidrock.strategy.loader import load_strategy_class, parse_param_pairs
+
+    if phase not in ("open", "signal", "close", "auto"):
+        console.print("[red]--phase 应为 open / signal / close / auto[/red]")
+        raise typer.Exit(1)
+    config = SessionConfig(
+        paper_cash=paper_cash,
+        limit_pct=limit_pct,
+        name=name or f"session-{strategy_file.stem}",
+    )
+    try:
+        strategy_cls = load_strategy_class(strategy_file)
+        strategy = strategy_cls(**parse_param_pairs(list(param)))
+        broker = None if execute is False else _broker(read_only=False)
+        session = LiveSession(strategy, _store(), broker, config=config)
+        if phase == "auto":
+            run_loop(
+                session,
+                open_time=open_time,
+                trigger_times=[t.strip() for t in trigger_times.split(",") if t.strip()],
+                close_time=close_time,
+                execute=execute,
+            )
+            return
+        summary = session.run_phase(phase, pd.Timestamp(now) if now else None, execute=execute)
+    except SolidRockError as e:
+        _print_error(e)
+        raise typer.Exit(1) from e
+
+    table = Table(title=f"会话完成 · {summary['phase']} · {summary['now']}")
+    table.add_column("标的", style="cyan")
+    table.add_column("方向")
+    table.add_column("数量", justify="right")
+    table.add_column("限价", justify="right")
+    table.add_column("状态")
+    for o in summary["orders"]:
+        table.add_row(
+            o["symbol"],
+            o["side"],
+            str(o["qty"]),
+            "-" if o["price"] is None else f"{o['price']:.3f}",
+            ("已提交" if o["submitted"] else o["note"]) or ("已提交" if o["submitted"] else "dry-run"),
+        )
+    if len(summary["orders"]) == 0:
+        console.print("本阶段无订单意图", style="dim")
+    else:
+        console.print(table)
+    for line in summary["logs"][:10]:
+        console.print(f"[dim]{line}[/dim]")
 
 
 # ----------------------------------------------------------------- ml

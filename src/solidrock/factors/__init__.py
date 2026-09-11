@@ -1,5 +1,6 @@
 """因子研究子包."""
 
+from solidrock.factors import builtin as _builtin  # noqa: F401  # 导入即注册内置因子
 from solidrock.factors.analysis import FactorAnalysisResult, analyze_factor
 from solidrock.factors.base import (
     Factor,
@@ -8,6 +9,7 @@ from solidrock.factors.base import (
     list_registered_factors,
     load_factor_class,
     register_factor,
+    resolve_factor,
 )
 from solidrock.factors.processing import (
     neutralize,
@@ -28,6 +30,7 @@ __all__ = [
     "neutralize",
     "rank_pct",
     "register_factor",
+    "resolve_factor",
     "winsorize_mad",
     "winsorize_quantile",
     "zscore",

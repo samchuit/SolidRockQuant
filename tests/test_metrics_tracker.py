@@ -10,7 +10,7 @@ import pytest
 
 from solidrock.agent.errors import ErrorCode, SolidRockError
 from solidrock.experiments.tracker import ExperimentTracker
-from solidrock.report.metrics import compute_metrics, format_metrics, yearly_returns
+from solidrock.report.metrics import compute_metrics, format_metrics, monthly_returns, yearly_returns
 
 
 def nav_series(values: list[float], start: str = "2024-01-02") -> pd.Series:
@@ -67,6 +67,67 @@ class TestMetrics:
         assert rows["夏普比率"] == "1.23"
         assert rows["累计收益"] == "21.50%"
         assert rows["成交笔数"] == "12"
+
+    def test_sortino(self) -> None:
+        nav = nav_series([100.0, 101.0, 98.98, 101.95, 100.93])
+        returns = nav.pct_change().dropna()
+        m = compute_metrics(nav)
+        downside = returns.clip(upper=0.0)
+        dd_risk = math.sqrt(float((downside**2).mean())) * math.sqrt(252)
+        expected = float(returns.mean()) * 252 / dd_risk
+        assert m["sortino"] == pytest.approx(expected, rel=1e-6)
+
+    def test_sortino_no_downside(self) -> None:
+        # 单调上涨：下行风险为 0，索提诺降级为 0 而非除零
+        m = compute_metrics(nav_series([100.0, 101.0, 102.0, 103.0]))
+        assert m["sortino"] == 0.0
+
+    def test_alpha_beta(self) -> None:
+        rb = [0.01, 0.02, -0.01, 0.03, 0.005, -0.02, 0.015, 0.01]
+        bench = pd.Series(100.0 * pd.Series([1.0] + [1.0 + r for r in rb]).cumprod().values,
+                          index=pd.bdate_range("2024-01-02", periods=len(rb) + 1))
+        nav = pd.Series(100.0 * pd.Series([1.0] + [1.0 + 1.5 * r for r in rb]).cumprod().values,
+                        index=bench.index)
+        m = compute_metrics(nav, bench)
+        assert m["beta"] == pytest.approx(1.5, rel=1e-6)
+        # 策略日收益恰为 1.5 倍基准 → Jensen's alpha 恒为 0
+        assert m["alpha"] == pytest.approx(0.0, abs=1e-9)
+
+    def test_alpha_beta_no_overlap(self) -> None:
+        nav = nav_series([100.0, 110.0, 121.0])
+        bench = pd.Series([100.0, 105.0], index=pd.bdate_range("2023-06-01", periods=2))
+        m = compute_metrics(nav, bench)
+        assert m["beta"] == 0.0
+        assert m["alpha"] == 0.0
+
+    def test_consecutive_day_streaks(self) -> None:
+        nav = nav_series([100.0, 101.0, 102.0, 103.0, 101.97, 100.95])
+        m = compute_metrics(nav)
+        assert m["max_consecutive_win_days"] == 3
+        assert m["max_consecutive_loss_days"] == 2
+
+    def test_single_trade_extremes(self) -> None:
+        nav = nav_series([100.0, 110.0, 99.0, 121.0])
+        trades = pd.DataFrame(
+            {
+                "side": ["buy", "sell", "sell", "sell"],
+                "value": [1000.0, 1100.0, 900.0, 1000.0],
+                "fees": [5.0, 5.0, 5.0, 5.0],
+                "pnl": [None, 100.0, -50.0, 20.0],
+            }
+        )
+        m = compute_metrics(nav, trades=trades)
+        assert m["max_single_win"] == pytest.approx(100.0)
+        assert m["max_single_loss"] == pytest.approx(-50.0)
+
+    def test_monthly_returns(self) -> None:
+        idx = pd.bdate_range("2024-01-30", periods=6)
+        nav = pd.Series([100.0, 110.0, 121.0, 121.0, 110.0, 99.0], index=idx)
+        monthly = monthly_returns(nav)
+        assert list(monthly.index) == ["2024-01", "2024-02"]
+        assert monthly["2024-01"] == pytest.approx(0.10)
+        # 2 月：月初基数是 1 月末收盘 110，月末 99 → -10%
+        assert monthly["2024-02"] == pytest.approx(99.0 / 110.0 - 1.0)
 
 
 class TestTracker:

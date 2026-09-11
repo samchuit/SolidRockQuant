@@ -17,10 +17,19 @@
             else:
                 ctx.order_target_percent("510300.SH", 0.0)
 
-生命周期（v0.1 日频）：
+生命周期：
 - ``setup``：数据加载前调用，设置 ``ctx.universe``；
-- ``on_signal``：每个交易日收盘后调用一次（bar 数据已包含当日），
-  产生的订单按引擎执行模式在次日开盘（默认）或当日收盘成交。
+- ``on_market_open``：每个交易日一次（日频=当日；分钟频=当日首 bar），
+  盘前计划钩子（选股、计算调仓目标等）；
+- ``on_signal``：日频每交易日一次；分钟频每 bar 一次（配置
+  ``trigger_times`` 后只在指定 HH:MM 的 bar 触发）；
+- ``on_market_close``：每个交易日一次（日频=当日；分钟频=当日末 bar），
+  在 on_signal 之后调用，盘后钩子（日终统计、发通知等）；
+- ``on_stop``：回测结束（最后一个 bar 之后）调用。
+
+所有策略钩子看到的都是**当日完整 bar**（bar 级引擎语义），钩子内产生
+的订单按引擎执行模式撮合：``next_open``（默认）次日开盘、
+``same_close`` 当日收盘——``on_market_open`` 并非真实开盘时点决策。
 """
 
 from __future__ import annotations
@@ -52,8 +61,14 @@ class Strategy:
     def setup(self, ctx: Context) -> None:
         """可选：设置 ctx.universe 等；在数据加载前调用。"""
 
+    def on_market_open(self, ctx: Context) -> None:
+        """可选：盘前钩子，每个交易日调用一次（分钟频=当日首 bar）。"""
+
     def on_signal(self, ctx: Context) -> None:
-        """核心钩子：每个交易日调用一次，通过 ctx 下单。"""
+        """核心钩子：日频每交易日 / 分钟频每 bar 调用一次，通过 ctx 下单。"""
+
+    def on_market_close(self, ctx: Context) -> None:
+        """可选：盘后钩子，每个交易日调用一次（on_signal 之后）。"""
 
     def on_stop(self, ctx: Context) -> None:
         """可选：回测结束（最后一个 bar 之后）调用。"""

@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # --- 数据源 ---
     default_source: str = "akshare"
+    source_fallbacks: str = "tdx,akshare"  # 降级链（逗号分隔），主源失败按序尝试
     tushare_token: str | None = None
 
     # --- 实盘（QMT / cfquant 桥接） ---

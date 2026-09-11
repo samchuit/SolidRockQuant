@@ -165,11 +165,12 @@ def build_server() -> Any:
     ) -> str:
         """运行因子分析：RankIC + 分层回测（自动留痕）。
 
-        factor_file：因子文件绝对路径（内含一个 Factor 子类，compute 返回
-        index=date/columns=symbol 的宽表）；universe 为股票池符号列表（建议
-        50 只以上，截面太少 IC 不可信）；quantiles 分层数；fwd_period 前瞻
-        收益期。解读：|IC均值|>0.03 且 ICIR>0.5 才值得继续；层间单调性比
-        多空收益更重要。
+        factor：因子文件绝对路径（内含一个 Factor 子类，compute 返回
+        index=date/columns=symbol 的宽表）或已注册因子名（内置：Mom/
+        Reversal/Volatility/Illiq/VWAPDev/AtrRatio，用 list_registered_factors
+        查全量）；universe 为股票池符号列表（建议 50 只以上，截面太少
+        IC 不可信）；quantiles 分层数；fwd_period 前瞻收益期。解读：
+        |IC均值|>0.03 且 ICIR>0.5 才值得继续；层间单调性比多空收益更重要。
         """
         return t.tool_run_factor_analysis(
             factor_file=factor_file,
@@ -196,6 +197,7 @@ def build_server() -> Any:
     ) -> str:
         """向量化因子筛选：做多头部分位、做空尾部分位的组合净值（秒级）。
 
+        factor 为因子文件路径或已注册因子名（见 run_factor_analysis）。
         适合批量扫参数的快速迭代；逐日再平衡、收盘成交、单一费率，
         结论仅用于相对比较，最终结论用 run_backtest 事件引擎复核。
         """

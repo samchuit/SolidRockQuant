@@ -270,7 +270,11 @@ def _run_backtest(
     rejection_counts = result.rejections["code"].value_counts().to_dict() if not result.rejections.empty else {}
     artifacts_dir = result.artifacts_dir
     artifacts = (
-        [str(artifacts_dir / f) for f in ("report.md", "result.json", "trades.csv", "nav.csv")]
+        [
+            str(artifacts_dir / f)
+            for f in ("report.html", "report.md", "result.json", "trades.csv", "nav.csv")
+            if (artifacts_dir / f).exists()
+        ]
         if artifacts_dir is not None
         else []
     )
@@ -305,10 +309,9 @@ def _run_vectorized_backtest(
     from solidrock.backtest.vectorized import vectorized_backtest, weights_from_factor
     from solidrock.data.calendar import TradingCalendar
     from solidrock.experiments.tracker import ExperimentTracker
-    from solidrock.factors import FactorData, load_factor_class
+    from solidrock.factors import FactorData, resolve_factor
 
-    factor_cls = load_factor_class(factor_file)
-    factor = factor_cls(**(params or {}))
+    factor = resolve_factor(factor_file, **(params or {}))
     store = _store()
     universe_list = [s.value for s in validate_symbols(universe)]
     cal = TradingCalendar(store)
@@ -486,12 +489,11 @@ def _run_factor_analysis(
     name: str | None = None,
     notes: str | None = None,
 ) -> dict:
-    from solidrock.factors import analyze_factor, load_factor_class
+    from solidrock.factors import analyze_factor, resolve_factor
 
     universe_list = [s.value for s in validate_symbols(universe)]
-    factor_cls = load_factor_class(factor_file)
     result = analyze_factor(
-        factor_cls(**(params or {})),
+        resolve_factor(factor_file, **(params or {})),
         _store(),
         universe_list,
         start=start,
